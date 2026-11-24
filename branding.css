@@ -1,6 +1,37 @@
+:root {
+  color: #252a65;
+  background: #f7f9fc;
+  --ink: #252a65;
+  --muted: #66718a;
+  --line: #dfe5f0;
+  --lime: #dce7f5;
+  --accent: #4778b8;
+}
+
+.topbar {
+  border-bottom-color: #dfe5f0;
+}
+
+aside {
+  background: #f0f3f9;
+  border-right-color: #dfe5f0;
+}
+
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline-color: #4778b8;
+}
+
 .brand {
   gap: 10px;
   min-width: 270px;
+}
+
+.brand-copy small {
+  color: #5576a7;
 }
 
 .brand-logo {
@@ -19,6 +50,125 @@
 .brand-copy small {
   font-size: 8px;
   letter-spacing: 1.5px;
+}
+
+.runtime-status.ready .signal,
+.progress-segments span.done {
+  background: #4778b8;
+}
+
+.link-button {
+  color: #3f69a5;
+}
+
+.challenge-button.active {
+  background: #e9eff9;
+  box-shadow: inset 3px 0 #4778b8;
+  color: #252a65;
+}
+
+.challenge-button.active .number,
+.challenge-button.solved .number,
+.question-state.solved {
+  color: #3f69a5;
+}
+
+.challenge-button.active small {
+  color: #6077a1;
+}
+
+.difficulty {
+  background: #edf1fa;
+  color: #4a5687;
+}
+
+.pane-tabs button.active {
+  border-bottom-color: #4778b8;
+  color: #252a65;
+}
+
+.hint-box {
+  background: #f0f4fb;
+}
+
+.hint,
+.hint-button {
+  color: #4e6794;
+}
+
+.primary {
+  background: #292f68;
+  border-color: #292f68;
+}
+
+.code-workspace,
+.solution-code {
+  background: #1d234c;
+}
+
+.code-workspace {
+  border-color: #1d234c;
+}
+
+.code-title,
+.code-actions {
+  background: #292f68;
+}
+
+.file-symbol {
+  color: #a9c5e8;
+}
+
+.editor-tools button {
+  background: #343b76;
+}
+
+.run-button {
+  background: #4778b8;
+  border-color: #4778b8;
+  color: #fff;
+}
+
+.play-icon {
+  color: #dce7f5;
+}
+
+.check-button {
+  background: #dce7f5;
+  border-color: #dce7f5;
+  color: #252a65;
+}
+
+.quick-guide {
+  background: #edf2fa;
+  border-color: #d5e0f0;
+}
+
+.quick-guide .eyebrow,
+.quick-guide h2,
+.quick-guide p,
+.quick-guide li,
+.quick-guide b,
+.quick-guide small,
+.quick-guide .plain-button {
+  color: #4b6390;
+}
+
+.console-output {
+  background: #f0f4fb;
+  color: #526b8e;
+}
+
+.run-button:hover {
+  background: #3d69a6;
+}
+
+.check-button:hover {
+  background: #cbdcf1;
+}
+
+.primary:hover {
+  background: #3b4780;
 }
 
 @media (max-width: 700px) {

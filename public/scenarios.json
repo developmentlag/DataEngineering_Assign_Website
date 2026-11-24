@@ -1,0 +1,4114 @@
+[
+  {
+    "id": "01-asof-pricing",
+    "title": "Price each trade using only information known then",
+    "difficulty": "Hard",
+    "tags": [
+      "as-of joins",
+      "bitemporal data",
+      "window functions",
+      "NULL semantics"
+    ],
+    "prompt": "A trading system stores versioned product quotes. Price every trade with the single winning quote that was both effective and published by the trade instant. Return trade_id, sku, quoted_price, gross_amount, price_status, ordered by trade_id ascending. Retain trades with no eligible quote and distinguish them from explicit price suspensions.",
+    "businessRules": [
+      "All TIMESTAMP values are timezone-naive UTC. A quote is eligible only for the same sku and when effective_at <= traded_at AND published_at <= traded_at; both boundaries are inclusive.",
+      "Among eligible quotes, choose the greatest effective_at, then greatest published_at, then greatest price_id. A newer publication of an older effective quote must not outrank a newer effective quote.",
+      "A winning NULL unit_price means SUSPENDED. Do not fall back to an older non-NULL quote. No eligible quote means NO_PRICE. Otherwise price_status is PRICED, including a zero quote.",
+      "quoted_price is the winning unit_price; gross_amount is quantity * quoted_price. Both amounts are NULL for SUSPENDED or NO_PRICE.",
+      "Trade IDs and price IDs are unique and non-null. sku and all timestamps are non-null; quantity is a positive integer. Only unit_price may be NULL. Return exactly one row per trade."
+    ],
+    "tables": [
+      {
+        "name": "s01_trades",
+        "description": "Trades requiring the price known at the trade instant.",
+        "columns": [
+          {
+            "name": "trade_id",
+            "type": "INTEGER",
+            "description": "Unique trade identifier"
+          },
+          {
+            "name": "sku",
+            "type": "VARCHAR",
+            "description": "Non-null product key"
+          },
+          {
+            "name": "traded_at",
+            "type": "TIMESTAMP",
+            "description": "UTC trade instant"
+          },
+          {
+            "name": "quantity",
+            "type": "INTEGER",
+            "description": "Positive, non-null unit quantity"
+          }
+        ],
+        "rows": [
+          [
+            101,
+            "A",
+            "2026-01-10 10:00:00",
+            2
+          ],
+          [
+            102,
+            "A",
+            "2026-01-10 10:30:00",
+            3
+          ],
+          [
+            103,
+            "A",
+            "2026-01-10 11:00:00",
+            1
+          ],
+          [
+            104,
+            "A",
+            "2026-01-10 12:00:00",
+            4
+          ],
+          [
+            105,
+            "A",
+            "2026-01-10 13:00:00",
+            2
+          ],
+          [
+            106,
+            "B",
+            "2026-01-10 10:00:00",
+            5
+          ],
+          [
+            107,
+            "B",
+            "2026-01-10 10:30:00",
+            1
+          ],
+          [
+            108,
+            "C",
+            "2026-01-10 10:00:00",
+            2
+          ]
+        ]
+      },
+      {
+        "name": "s01_prices",
+        "description": "Versioned quotes; effective time and publication time are separate.",
+        "columns": [
+          {
+            "name": "price_id",
+            "type": "INTEGER",
+            "description": "Unique non-null quote identifier, also the final tie-breaker"
+          },
+          {
+            "name": "sku",
+            "type": "VARCHAR",
+            "description": "Non-null product key"
+          },
+          {
+            "name": "effective_at",
+            "type": "TIMESTAMP",
+            "description": "When this quote becomes economically effective"
+          },
+          {
+            "name": "published_at",
+            "type": "TIMESTAMP",
+            "description": "When this quote became known"
+          },
+          {
+            "name": "unit_price",
+            "type": "DECIMAL(10,2)",
+            "description": "NULL means explicitly suspended; zero is a valid price"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            "A",
+            "2026-01-10 09:00:00",
+            "2026-01-10 08:55:00",
+            10
+          ],
+          [
+            2,
+            "A",
+            "2026-01-10 10:00:00",
+            "2026-01-10 09:59:00",
+            12
+          ],
+          [
+            3,
+            "A",
+            "2026-01-10 10:00:00",
+            "2026-01-10 10:30:00",
+            13
+          ],
+          [
+            4,
+            "A",
+            "2026-01-10 10:00:00",
+            "2026-01-10 10:30:00",
+            14
+          ],
+          [
+            5,
+            "A",
+            "2026-01-10 11:00:00",
+            "2026-01-10 12:00:00",
+            15
+          ],
+          [
+            6,
+            "A",
+            "2026-01-10 12:00:00",
+            "2026-01-10 11:50:00",
+            null
+          ],
+          [
+            7,
+            "A",
+            "2026-01-10 13:00:00",
+            "2026-01-10 12:59:00",
+            0
+          ],
+          [
+            8,
+            "A",
+            "2026-01-10 14:00:00",
+            "2026-01-10 09:00:00",
+            99
+          ],
+          [
+            9,
+            "B",
+            "2026-01-10 08:00:00",
+            "2026-01-10 08:00:00",
+            5
+          ],
+          [
+            10,
+            "B",
+            "2026-01-10 09:00:00",
+            "2026-01-10 10:30:00",
+            6
+          ],
+          [
+            11,
+            "B",
+            "2026-01-10 10:00:00",
+            "2026-01-10 10:00:00",
+            7
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS s01_prices;\n\nDROP TABLE IF EXISTS s01_trades;\n\nCREATE TABLE s01_trades (\n  trade_id INTEGER,\n  sku VARCHAR,\n  traded_at TIMESTAMP,\n  quantity INTEGER\n);\n\nINSERT INTO s01_trades VALUES\n  (101, 'A', '2026-01-10 10:00:00', 2),\n  (102, 'A', '2026-01-10 10:30:00', 3),\n  (103, 'A', '2026-01-10 11:00:00', 1),\n  (104, 'A', '2026-01-10 12:00:00', 4),\n  (105, 'A', '2026-01-10 13:00:00', 2),\n  (106, 'B', '2026-01-10 10:00:00', 5),\n  (107, 'B', '2026-01-10 10:30:00', 1),\n  (108, 'C', '2026-01-10 10:00:00', 2);\n\nCREATE TABLE s01_prices (\n  price_id INTEGER,\n  sku VARCHAR,\n  effective_at TIMESTAMP,\n  published_at TIMESTAMP,\n  unit_price DECIMAL(10,2)\n);\n\nINSERT INTO s01_prices VALUES\n  (1, 'A', '2026-01-10 09:00:00', '2026-01-10 08:55:00', 10),\n  (2, 'A', '2026-01-10 10:00:00', '2026-01-10 09:59:00', 12),\n  (3, 'A', '2026-01-10 10:00:00', '2026-01-10 10:30:00', 13),\n  (4, 'A', '2026-01-10 10:00:00', '2026-01-10 10:30:00', 14),\n  (5, 'A', '2026-01-10 11:00:00', '2026-01-10 12:00:00', 15),\n  (6, 'A', '2026-01-10 12:00:00', '2026-01-10 11:50:00', NULL),\n  (7, 'A', '2026-01-10 13:00:00', '2026-01-10 12:59:00', 0),\n  (8, 'A', '2026-01-10 14:00:00', '2026-01-10 09:00:00', 99),\n  (9, 'B', '2026-01-10 08:00:00', '2026-01-10 08:00:00', 5),\n  (10, 'B', '2026-01-10 09:00:00', '2026-01-10 10:30:00', 6),\n  (11, 'B', '2026-01-10 10:00:00', '2026-01-10 10:00:00', 7);",
+    "starterSql": "-- Find eligible quotes, rank them separately for each trade, and retain rank 1.\nSELECT trade_id, sku, traded_at, quantity\nFROM s01_trades\nORDER BY trade_id;",
+    "solutionSql": "WITH ranked_quotes AS (\n    SELECT t.trade_id, t.sku, t.quantity, p.price_id, p.unit_price,\n           ROW_NUMBER() OVER (\n               PARTITION BY t.trade_id\n               ORDER BY p.effective_at DESC NULLS LAST,\n                        p.published_at DESC NULLS LAST,\n                        p.price_id DESC NULLS LAST\n           ) AS quote_rank\n    FROM s01_trades AS t\n    LEFT JOIN s01_prices AS p\n      ON p.sku = t.sku\n     AND p.effective_at <= t.traded_at\n     AND p.published_at <= t.traded_at\n)\nSELECT trade_id, sku, unit_price AS quoted_price,\n       quantity * unit_price AS gross_amount,\n       CASE WHEN price_id IS NULL THEN 'NO_PRICE'\n            WHEN unit_price IS NULL THEN 'SUSPENDED'\n            ELSE 'PRICED' END AS price_status\nFROM ranked_quotes\nWHERE quote_rank = 1\nORDER BY trade_id;",
+    "expected": {
+      "columns": [
+        "trade_id",
+        "sku",
+        "quoted_price",
+        "gross_amount",
+        "price_status"
+      ],
+      "rows": [
+        [
+          101,
+          "A",
+          12,
+          24,
+          "PRICED"
+        ],
+        [
+          102,
+          "A",
+          14,
+          42,
+          "PRICED"
+        ],
+        [
+          103,
+          "A",
+          14,
+          14,
+          "PRICED"
+        ],
+        [
+          104,
+          "A",
+          null,
+          null,
+          "SUSPENDED"
+        ],
+        [
+          105,
+          "A",
+          0,
+          0,
+          "PRICED"
+        ],
+        [
+          106,
+          "B",
+          7,
+          35,
+          "PRICED"
+        ],
+        [
+          107,
+          "B",
+          7,
+          7,
+          "PRICED"
+        ],
+        [
+          108,
+          "C",
+          null,
+          null,
+          "NO_PRICE"
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "The left join limits candidates using both clocks before ranking. Its unmatched row is intentional: ROW_NUMBER still emits one row for a trade with no eligible quote.",
+      "Ranking begins with effective_at, so a late revision of an older effective quote cannot displace a newer effective quote. published_at and price_id make the choice deterministic within that effective time.",
+      "Check price_id for the absence of a match; checking only unit_price would collapse NO_PRICE and SUSPENDED. Do not filter NULL prices before ranking.",
+      "Trade 103 still uses quote 4 because quote 5 is not published until noon. At noon, quote 6 wins by effective time and suspends pricing. Trade 107 uses quote 11 even though older-effective quote 10 is published later."
+    ],
+    "hints": [
+      "First write the two inequalities that make a quote eligible for one trade. Keep unmatched trades with a LEFT JOIN.",
+      "Within each trade, rank eligible rows by effective time, publication time, and price ID, all descending. Apply eligibility before ranking.",
+      "After selecting rank 1, use the quote identifier to distinguish a missing match from a matched quote whose price is NULL. Zero needs no special treatment."
+    ],
+    "pitfalls": [
+      "Looking only at effective_at leaks quotes published after the trade.",
+      "Picking the latest published quote can incorrectly choose an older effective price.",
+      "Filtering unit_price IS NOT NULL silently undoes suspensions.",
+      "Using an INNER JOIN drops trades without prices; omitting the ID tie-breaker makes ties nondeterministic."
+    ],
+    "wrongQueries": [
+      {
+        "label": "Looks ahead by ignoring publication time",
+        "sql": "WITH ranked_quotes AS (\n    SELECT t.trade_id, t.sku, t.quantity, p.price_id, p.unit_price,\n           ROW_NUMBER() OVER (\n               PARTITION BY t.trade_id\n               ORDER BY p.effective_at DESC NULLS LAST,\n                        p.published_at DESC NULLS LAST,\n                        p.price_id DESC NULLS LAST\n           ) AS quote_rank\n    FROM s01_trades AS t\n    LEFT JOIN s01_prices AS p\n      ON p.sku = t.sku\n     AND p.effective_at <= t.traded_at\n)\nSELECT trade_id, sku, unit_price AS quoted_price,\n       quantity * unit_price AS gross_amount,\n       CASE WHEN price_id IS NULL THEN 'NO_PRICE'\n            WHEN unit_price IS NULL THEN 'SUSPENDED'\n            ELSE 'PRICED' END AS price_status\nFROM ranked_quotes\nWHERE quote_rank = 1\nORDER BY trade_id;"
+      }
+    ],
+    "rowExplanations": [
+      {
+        "key": "101",
+        "text": "Quote 2 is known at 10:00; same-effective quotes 3 and 4 are still unpublished. 2 \u00d7 12 = 24."
+      },
+      {
+        "key": "102",
+        "text": "Quotes 3 and 4 become eligible exactly at 10:30; the larger price_id selects quote 4. 3 \u00d7 14 = 42."
+      },
+      {
+        "key": "103",
+        "text": "The 11:00-effective quote is not published until 12:00, so quote 4 remains the winner."
+      },
+      {
+        "key": "104",
+        "text": "The 12:00-effective NULL quote wins, giving SUSPENDED and NULL amounts."
+      },
+      {
+        "key": "105",
+        "text": "The 13:00 quote is zero, a valid price; the 14:00 quote is still future-effective."
+      },
+      {
+        "key": "106",
+        "text": "The 10:00 quote is eligible on both inclusive boundaries; 5 \u00d7 7 = 35."
+      },
+      {
+        "key": "107",
+        "text": "Quote 11 stays ahead of quote 10 because effective time outranks publication time."
+      },
+      {
+        "key": "108",
+        "text": "Product C has no quotes, so the trade remains with NO_PRICE."
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Exact boundaries, deterministic ties, and a delayed suspension",
+        "setupSql": "DROP TABLE IF EXISTS s01_prices;\n\nDROP TABLE IF EXISTS s01_trades;\n\nCREATE TABLE s01_trades (\n  trade_id INTEGER,\n  sku VARCHAR,\n  traded_at TIMESTAMP,\n  quantity INTEGER\n);\n\nINSERT INTO s01_trades VALUES\n  (201, 'X', '2026-02-01 10:00:00', 2),\n  (202, 'X', '2026-02-01 10:01:00', 3),\n  (203, 'X', '2026-02-01 10:02:00', 4),\n  (204, 'Y', '2026-02-01 10:00:00', 1);\n\nCREATE TABLE s01_prices (\n  price_id INTEGER,\n  sku VARCHAR,\n  effective_at TIMESTAMP,\n  published_at TIMESTAMP,\n  unit_price DECIMAL(10,2)\n);\n\nINSERT INTO s01_prices VALUES\n  (1, 'X', '2026-02-01 10:00:00', '2026-02-01 10:00:00', 8),\n  (2, 'X', '2026-02-01 10:00:00', '2026-02-01 10:00:00', 9),\n  (3, 'X', '2026-02-01 10:01:00', '2026-02-01 10:02:00', NULL),\n  (4, 'X', '2026-02-01 10:02:00', '2026-02-01 10:03:00', 20),\n  (5, 'Y', '2026-02-01 10:01:00', '2026-02-01 09:00:00', 5);",
+        "expected": {
+          "columns": [
+            "trade_id",
+            "sku",
+            "quoted_price",
+            "gross_amount",
+            "price_status"
+          ],
+          "rows": [
+            [
+              201,
+              "X",
+              9,
+              18,
+              "PRICED"
+            ],
+            [
+              202,
+              "X",
+              9,
+              27,
+              "PRICED"
+            ],
+            [
+              203,
+              "X",
+              null,
+              null,
+              "SUSPENDED"
+            ],
+            [
+              204,
+              "Y",
+              null,
+              null,
+              "NO_PRICE"
+            ]
+          ]
+        },
+        "explanation": "At 10:00 the tied quote with ID 2 wins. At 10:01 the suspension is still unpublished. At 10:02 it becomes visible, while quote 4 is still unpublished. Y has only a future-effective quote."
+      },
+      {
+        "label": "An entirely empty quote history",
+        "setupSql": "DROP TABLE IF EXISTS s01_prices;\n\nDROP TABLE IF EXISTS s01_trades;\n\nCREATE TABLE s01_trades (\n  trade_id INTEGER,\n  sku VARCHAR,\n  traded_at TIMESTAMP,\n  quantity INTEGER\n);\n\nINSERT INTO s01_trades VALUES\n  (301, 'M', '2026-03-01 00:00:00', 1),\n  (302, 'N', '2026-03-01 00:00:00', 7);\n\nCREATE TABLE s01_prices (\n  price_id INTEGER,\n  sku VARCHAR,\n  effective_at TIMESTAMP,\n  published_at TIMESTAMP,\n  unit_price DECIMAL(10,2)\n);",
+        "expected": {
+          "columns": [
+            "trade_id",
+            "sku",
+            "quoted_price",
+            "gross_amount",
+            "price_status"
+          ],
+          "rows": [
+            [
+              301,
+              "M",
+              null,
+              null,
+              "NO_PRICE"
+            ],
+            [
+              302,
+              "N",
+              null,
+              null,
+              "NO_PRICE"
+            ]
+          ]
+        },
+        "explanation": "The query must preserve both trades even when the quote table contains no rows."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB window functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/window_functions"
+      }
+    ]
+  },
+  {
+    "id": "02-interval-coverage",
+    "title": "Find every uncovered interval after merging overlaps",
+    "difficulty": "Hard",
+    "tags": [
+      "gaps and islands",
+      "interval algebra",
+      "running maximum",
+      "window functions"
+    ],
+    "prompt": "Audit service coverage during the fixed UTC interval [2026-04-01 00:00:00, 2026-04-01 12:00:00). Return every maximal uncovered interval for every registered resource. Output resource_id, gap_start, gap_end, gap_minutes, ordered by resource_id ascending and gap_start ascending. Return gap_start and gap_end as VARCHAR timestamp strings; omit resources with complete coverage.",
+    "businessRules": [
+      "All timestamps are timezone-naive UTC and minute-aligned. Every interval is half-open: starts_at is included and ends_at is excluded.",
+      "Ignore rows with NULL starts_at, with a non-NULL ends_at <= starts_at, or with resource_id absent from s02_resources. A NULL ends_at means indefinitely open coverage.",
+      "Clip valid coverage to the fixed reporting window. Intervals that only touch the reporting boundary contribute no coverage.",
+      "Merge overlapping and exactly touching coverage, including nested intervals and duplicate ranges. Emit positive-length maximal gaps only; gap_minutes is their integer duration.",
+      "Include a full-window gap for every registered resource with no coverage. Registered resource IDs and coverage IDs are unique and non-null; coverage resource_id is non-null. Do not assume raw intervals are ordered."
+    ],
+    "tables": [
+      {
+        "name": "s02_resources",
+        "description": "Every resource that must be audited, including resources with no valid coverage.",
+        "columns": [
+          {
+            "name": "resource_id",
+            "type": "VARCHAR",
+            "description": "Unique, non-null resource identifier"
+          }
+        ],
+        "rows": [
+          [
+            "R1"
+          ],
+          [
+            "R2"
+          ],
+          [
+            "R3"
+          ],
+          [
+            "R4"
+          ]
+        ]
+      },
+      {
+        "name": "s02_coverage",
+        "description": "Raw half-open coverage intervals; malformed rows must be ignored.",
+        "columns": [
+          {
+            "name": "coverage_id",
+            "type": "INTEGER",
+            "description": "Unique, non-null interval identifier"
+          },
+          {
+            "name": "resource_id",
+            "type": "VARCHAR",
+            "description": "Resource identifier"
+          },
+          {
+            "name": "starts_at",
+            "type": "TIMESTAMP",
+            "description": "UTC inclusive start; NULL means invalid"
+          },
+          {
+            "name": "ends_at",
+            "type": "TIMESTAMP",
+            "description": "UTC exclusive end; NULL means open-ended"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            "R1",
+            "2026-03-31 23:00:00",
+            "2026-04-01 06:00:00"
+          ],
+          [
+            2,
+            "R1",
+            "2026-04-01 01:00:00",
+            "2026-04-01 02:00:00"
+          ],
+          [
+            3,
+            "R1",
+            "2026-04-01 03:00:00",
+            "2026-04-01 04:00:00"
+          ],
+          [
+            4,
+            "R1",
+            "2026-04-01 06:00:00",
+            "2026-04-01 08:00:00"
+          ],
+          [
+            5,
+            "R1",
+            "2026-04-01 10:00:00",
+            "2026-04-01 11:00:00"
+          ],
+          [
+            6,
+            "R2",
+            "2026-03-31 23:00:00",
+            "2026-04-01 00:00:00"
+          ],
+          [
+            7,
+            "R2",
+            "2026-04-01 02:00:00",
+            null
+          ],
+          [
+            8,
+            "R2",
+            "2026-04-01 05:00:00",
+            "2026-04-01 04:00:00"
+          ],
+          [
+            9,
+            "R3",
+            null,
+            "2026-04-01 08:00:00"
+          ],
+          [
+            10,
+            "R3",
+            "2026-04-01 08:00:00",
+            "2026-04-01 08:00:00"
+          ],
+          [
+            11,
+            "R3",
+            "2026-04-01 12:00:00",
+            "2026-04-01 13:00:00"
+          ],
+          [
+            12,
+            "R4",
+            "2026-04-01 00:00:00",
+            "2026-04-01 12:00:00"
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS s02_coverage;\n\nDROP TABLE IF EXISTS s02_resources;\n\nCREATE TABLE s02_resources (\n  resource_id VARCHAR\n);\n\nINSERT INTO s02_resources VALUES\n  ('R1'),\n  ('R2'),\n  ('R3'),\n  ('R4');\n\nCREATE TABLE s02_coverage (\n  coverage_id INTEGER,\n  resource_id VARCHAR,\n  starts_at TIMESTAMP,\n  ends_at TIMESTAMP\n);\n\nINSERT INTO s02_coverage VALUES\n  (1, 'R1', '2026-03-31 23:00:00', '2026-04-01 06:00:00'),\n  (2, 'R1', '2026-04-01 01:00:00', '2026-04-01 02:00:00'),\n  (3, 'R1', '2026-04-01 03:00:00', '2026-04-01 04:00:00'),\n  (4, 'R1', '2026-04-01 06:00:00', '2026-04-01 08:00:00'),\n  (5, 'R1', '2026-04-01 10:00:00', '2026-04-01 11:00:00'),\n  (6, 'R2', '2026-03-31 23:00:00', '2026-04-01 00:00:00'),\n  (7, 'R2', '2026-04-01 02:00:00', NULL),\n  (8, 'R2', '2026-04-01 05:00:00', '2026-04-01 04:00:00'),\n  (9, 'R3', NULL, '2026-04-01 08:00:00'),\n  (10, 'R3', '2026-04-01 08:00:00', '2026-04-01 08:00:00'),\n  (11, 'R3', '2026-04-01 12:00:00', '2026-04-01 13:00:00'),\n  (12, 'R4', '2026-04-01 00:00:00', '2026-04-01 12:00:00');",
+    "starterSql": "-- Normalize and clip coverage before finding islands and their complement.\nSELECT resource_id, coverage_id, starts_at, ends_at\nFROM s02_coverage\nORDER BY resource_id, starts_at, coverage_id;",
+    "solutionSql": "WITH params AS (\n    SELECT TIMESTAMP '2026-04-01 00:00:00' AS window_start,\n           TIMESTAMP '2026-04-01 12:00:00' AS window_end\n), clipped AS (\n    SELECT c.coverage_id, c.resource_id,\n           GREATEST(c.starts_at, p.window_start) AS starts_at,\n           LEAST(COALESCE(c.ends_at, p.window_end), p.window_end) AS ends_at\n    FROM s02_coverage AS c\n    JOIN s02_resources AS r ON r.resource_id = c.resource_id\n    CROSS JOIN params AS p\n    WHERE c.starts_at IS NOT NULL\n      AND (c.ends_at IS NULL OR c.ends_at > c.starts_at)\n      AND c.starts_at < p.window_end\n      AND COALESCE(c.ends_at, p.window_end) > p.window_start\n), prior_reach AS (\n    SELECT *,\n           MAX(ends_at) OVER (\n               PARTITION BY resource_id\n               ORDER BY starts_at, ends_at, coverage_id\n               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING\n           ) AS prior_end\n    FROM clipped\n), marked AS (\n    SELECT *, CASE WHEN prior_end IS NULL OR starts_at > prior_end\n                   THEN 1 ELSE 0 END AS starts_island\n    FROM prior_reach\n), numbered AS (\n    SELECT *, SUM(starts_island) OVER (\n        PARTITION BY resource_id ORDER BY starts_at, ends_at, coverage_id\n        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n    ) AS island_id\n    FROM marked\n), islands AS (\n    SELECT resource_id, MIN(starts_at) AS starts_at, MAX(ends_at) AS ends_at\n    FROM numbered\n    GROUP BY resource_id, island_id\n), bounded AS (\n    SELECT resource_id, starts_at, ends_at FROM islands\n    UNION ALL\n    SELECT r.resource_id, p.window_start, p.window_start\n    FROM s02_resources AS r CROSS JOIN params AS p\n    UNION ALL\n    SELECT r.resource_id, p.window_end, p.window_end\n    FROM s02_resources AS r CROSS JOIN params AS p\n), gaps AS (\n    SELECT resource_id, ends_at AS gap_start,\n           LEAD(starts_at) OVER (\n               PARTITION BY resource_id ORDER BY starts_at, ends_at\n           ) AS gap_end\n    FROM bounded\n)\nSELECT resource_id, CAST(gap_start AS VARCHAR) AS gap_start,\n       CAST(gap_end AS VARCHAR) AS gap_end,\n       DATE_DIFF('minute', gap_start, gap_end) AS gap_minutes\nFROM gaps\nWHERE gap_end > gap_start\nORDER BY resource_id, gap_start;",
+    "expected": {
+      "columns": [
+        "resource_id",
+        "gap_start",
+        "gap_end",
+        "gap_minutes"
+      ],
+      "rows": [
+        [
+          "R1",
+          "2026-04-01 08:00:00",
+          "2026-04-01 10:00:00",
+          120
+        ],
+        [
+          "R1",
+          "2026-04-01 11:00:00",
+          "2026-04-01 12:00:00",
+          60
+        ],
+        [
+          "R2",
+          "2026-04-01 00:00:00",
+          "2026-04-01 02:00:00",
+          120
+        ],
+        [
+          "R3",
+          "2026-04-01 00:00:00",
+          "2026-04-01 12:00:00",
+          720
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Clip only valid intersecting intervals. This makes open-ended coverage finite and removes intervals with zero contribution to the report.",
+      "The prior running MAX(ends_at), excluding the current row, records the furthest coverage reached by any earlier interval. A new island begins only when starts_at is strictly beyond that reach; equality keeps touching intervals together.",
+      "Aggregate each island to one start and end. Add zero-length sentinels at both report boundaries for every registered resource, then use LEAD to find the space between merged coverage ranges.",
+      "R1 is covered continuously from midnight to 08:00 despite nested rows, then from 10:00 to 11:00. R2 is covered from 02:00 onward. R3 has no valid intersecting coverage. R4 is fully covered."
+    ],
+    "hints": [
+      "First reject invalid rows and clip the remaining half-open intervals to the reporting window.",
+      "An immediately previous end is not enough when intervals nest. Compare each start with the maximum end of all earlier intervals, then number the islands.",
+      "After merging islands, add both window boundaries for every resource. The positive spaces between consecutive ranges are the maximal gaps, including for resources with no ranges."
+    ],
+    "pitfalls": [
+      "Using LAG(ends_at) instead of the prior running maximum invents gaps inside a longer enclosing interval.",
+      "Treating touching intervals as disconnected or using inclusive end boundaries creates zero-length or false gaps.",
+      "Dropping NULL ends loses open-ended coverage; retaining NULL starts invents coverage.",
+      "Starting from coverage rather than the resource registry loses resources with no valid intervals."
+    ],
+    "wrongQueries": [
+      {
+        "label": "Uses the immediately previous end rather than the running coverage frontier",
+        "sql": "WITH params AS (\n    SELECT TIMESTAMP '2026-04-01 00:00:00' AS window_start,\n           TIMESTAMP '2026-04-01 12:00:00' AS window_end\n), clipped AS (\n    SELECT c.coverage_id, c.resource_id,\n           GREATEST(c.starts_at, p.window_start) AS starts_at,\n           LEAST(COALESCE(c.ends_at, p.window_end), p.window_end) AS ends_at\n    FROM s02_coverage AS c\n    JOIN s02_resources AS r ON r.resource_id = c.resource_id\n    CROSS JOIN params AS p\n    WHERE c.starts_at IS NOT NULL\n      AND (c.ends_at IS NULL OR c.ends_at > c.starts_at)\n      AND c.starts_at < p.window_end\n      AND COALESCE(c.ends_at, p.window_end) > p.window_start\n), prior_reach AS (\n    SELECT *,\n           LAG(ends_at) OVER (\n               PARTITION BY resource_id\n               ORDER BY starts_at, ends_at, coverage_id\n           ) AS prior_end\n    FROM clipped\n), marked AS (\n    SELECT *, CASE WHEN prior_end IS NULL OR starts_at > prior_end\n                   THEN 1 ELSE 0 END AS starts_island\n    FROM prior_reach\n), numbered AS (\n    SELECT *, SUM(starts_island) OVER (\n        PARTITION BY resource_id ORDER BY starts_at, ends_at, coverage_id\n        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n    ) AS island_id\n    FROM marked\n), islands AS (\n    SELECT resource_id, MIN(starts_at) AS starts_at, MAX(ends_at) AS ends_at\n    FROM numbered\n    GROUP BY resource_id, island_id\n), bounded AS (\n    SELECT resource_id, starts_at, ends_at FROM islands\n    UNION ALL\n    SELECT r.resource_id, p.window_start, p.window_start\n    FROM s02_resources AS r CROSS JOIN params AS p\n    UNION ALL\n    SELECT r.resource_id, p.window_end, p.window_end\n    FROM s02_resources AS r CROSS JOIN params AS p\n), gaps AS (\n    SELECT resource_id, ends_at AS gap_start,\n           LEAD(starts_at) OVER (\n               PARTITION BY resource_id ORDER BY starts_at, ends_at\n           ) AS gap_end\n    FROM bounded\n)\nSELECT resource_id, CAST(gap_start AS VARCHAR) AS gap_start,\n       CAST(gap_end AS VARCHAR) AS gap_end,\n       DATE_DIFF('minute', gap_start, gap_end) AS gap_minutes\nFROM gaps\nWHERE gap_end > gap_start\nORDER BY resource_id, gap_start;"
+      }
+    ],
+    "rowExplanations": [
+      {
+        "key": "R1 / 08:00",
+        "text": "The first long interval plus touching coverage at 06:00 reaches 08:00; the next coverage begins at 10:00, leaving 120 minutes."
+      },
+      {
+        "key": "R1 / 11:00",
+        "text": "The last R1 interval ends at 11:00, leaving 60 minutes until the report ends."
+      },
+      {
+        "key": "R2 / 00:00",
+        "text": "The pre-window interval ends exactly at midnight and contributes nothing. Open-ended coverage starts at 02:00, so 120 minutes are uncovered."
+      },
+      {
+        "key": "R3 / 00:00",
+        "text": "NULL start, zero-length, and out-of-window rows all contribute nothing, so all 720 minutes are uncovered."
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Deep nesting, touching chains, and an empty resource",
+        "setupSql": "DROP TABLE IF EXISTS s02_coverage;\n\nDROP TABLE IF EXISTS s02_resources;\n\nCREATE TABLE s02_resources (\n  resource_id VARCHAR\n);\n\nINSERT INTO s02_resources VALUES\n  ('N'),\n  ('T'),\n  ('E');\n\nCREATE TABLE s02_coverage (\n  coverage_id INTEGER,\n  resource_id VARCHAR,\n  starts_at TIMESTAMP,\n  ends_at TIMESTAMP\n);\n\nINSERT INTO s02_coverage VALUES\n  (1, 'N', '2026-04-01 01:00:00', '2026-04-01 10:00:00'),\n  (2, 'N', '2026-04-01 02:00:00', '2026-04-01 03:00:00'),\n  (3, 'N', '2026-04-01 04:00:00', '2026-04-01 05:00:00'),\n  (4, 'T', '2026-04-01 00:00:00', '2026-04-01 03:00:00'),\n  (5, 'T', '2026-04-01 03:00:00', '2026-04-01 08:00:00'),\n  (6, 'T', '2026-04-01 08:00:00', NULL);",
+        "expected": {
+          "columns": [
+            "resource_id",
+            "gap_start",
+            "gap_end",
+            "gap_minutes"
+          ],
+          "rows": [
+            [
+              "E",
+              "2026-04-01 00:00:00",
+              "2026-04-01 12:00:00",
+              720
+            ],
+            [
+              "N",
+              "2026-04-01 00:00:00",
+              "2026-04-01 01:00:00",
+              60
+            ],
+            [
+              "N",
+              "2026-04-01 10:00:00",
+              "2026-04-01 12:00:00",
+              120
+            ]
+          ]
+        },
+        "explanation": "N has one enclosing interval despite its nested rows. T has continuous coverage across exact-touch boundaries. E has no interval rows and must still appear."
+      },
+      {
+        "label": "Non-intersecting, invalid, orphan, and fully spanning intervals",
+        "setupSql": "DROP TABLE IF EXISTS s02_coverage;\n\nDROP TABLE IF EXISTS s02_resources;\n\nCREATE TABLE s02_resources (\n  resource_id VARCHAR\n);\n\nINSERT INTO s02_resources VALUES\n  ('Z'),\n  ('F');\n\nCREATE TABLE s02_coverage (\n  coverage_id INTEGER,\n  resource_id VARCHAR,\n  starts_at TIMESTAMP,\n  ends_at TIMESTAMP\n);\n\nINSERT INTO s02_coverage VALUES\n  (1, 'Z', '2026-03-31 23:00:00', '2026-04-01 00:00:00'),\n  (2, 'Z', '2026-04-01 12:00:00', '2026-04-01 13:00:00'),\n  (3, 'Z', '2026-04-01 09:00:00', '2026-04-01 08:00:00'),\n  (4, 'Z', NULL, '2026-04-01 04:00:00'),\n  (5, 'F', '2026-03-31 23:00:00', '2026-04-02 13:00:00'),\n  (6, 'ORPHAN', '2026-04-01 02:00:00', '2026-04-01 03:00:00');",
+        "expected": {
+          "columns": [
+            "resource_id",
+            "gap_start",
+            "gap_end",
+            "gap_minutes"
+          ],
+          "rows": [
+            [
+              "Z",
+              "2026-04-01 00:00:00",
+              "2026-04-01 12:00:00",
+              720
+            ]
+          ]
+        },
+        "explanation": "Z has no positive-length valid intersection. F spans the entire reporting window and has no gap. The unknown resource is excluded."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB window functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/window_functions"
+      }
+    ]
+  },
+  {
+    "id": "03-cohort-retention",
+    "title": "Compute mature anniversary-week retention without censoring bias",
+    "difficulty": "Hard",
+    "tags": [
+      "cohort analysis",
+      "right censoring",
+      "conditional aggregation",
+      "temporal boundaries"
+    ],
+    "prompt": "Measure session retention as of the exclusive UTC cutoff 2026-06-22 00:00:00. Group users into Monday-start signup cohorts, but measure weeks 0, 1, and 2 from each user's exact signup instant. Return cohort_week, week_number, eligible_users, retained_users, retention_pct, ordered by cohort_week ascending then week_number ascending. cohort_week must be a YYYY-MM-DD VARCHAR. Include all three week rows for every cohort with at least one signup before the cutoff, even if no user is yet eligible.",
+    "businessRules": [
+      "All timestamps are timezone-naive UTC. Exclude users whose signup_at >= the cutoff. cohort_week is the Monday date of the week containing signup_at.",
+      "For week k in {0,1,2}, a user's window is [signup_at + 7*k days, signup_at + 7*(k+1) days). These are exact seven-day anniversary windows, not calendar-week buckets.",
+      "A user is eligible for week k only when the entire window has ended by the cutoff: window_end <= cutoff. Do not include partially observed windows in either count.",
+      "An eligible user is retained if at least one event has event_type exactly session and occurred_at within that user's half-open window. Count users once, regardless of duplicate events. Events at the cutoff, before signup, for unknown users, or with NULL user_id do not contribute.",
+      "eligible_users and retained_users are integer counts. retention_pct = 100 * retained_users / eligible_users, rounded to two decimal places; it is NULL when eligible_users is zero. All other counts are zero, not NULL, for zero-eligible rows.",
+      "user_id is unique and non-null in s03_users; signup_at is non-null. event_id is unique and non-null; occurred_at and event_type are non-null. Only event user_id may be NULL."
+    ],
+    "tables": [
+      {
+        "name": "s03_users",
+        "description": "Signup instants determine anniversary-week windows; users at or after the cutoff are excluded.",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "INTEGER",
+            "description": "Unique non-null user identifier"
+          },
+          {
+            "name": "signup_at",
+            "type": "TIMESTAMP",
+            "description": "Non-null UTC signup instant"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            "2026-06-01 00:00:00"
+          ],
+          [
+            2,
+            "2026-06-02 00:00:00"
+          ],
+          [
+            3,
+            "2026-06-08 00:00:00"
+          ],
+          [
+            4,
+            "2026-06-10 00:00:00"
+          ],
+          [
+            5,
+            "2026-06-15 00:00:00"
+          ],
+          [
+            6,
+            "2026-06-16 00:00:00"
+          ],
+          [
+            7,
+            "2026-06-22 00:00:00"
+          ],
+          [
+            8,
+            "2026-05-31 00:00:00"
+          ]
+        ]
+      },
+      {
+        "name": "s03_events",
+        "description": "Activity stream may include duplicates, non-session events, and unmatched user IDs.",
+        "columns": [
+          {
+            "name": "event_id",
+            "type": "INTEGER",
+            "description": "Unique non-null event identifier"
+          },
+          {
+            "name": "user_id",
+            "type": "INTEGER",
+            "description": "May be NULL or absent from the user table"
+          },
+          {
+            "name": "occurred_at",
+            "type": "TIMESTAMP",
+            "description": "Non-null UTC event instant"
+          },
+          {
+            "name": "event_type",
+            "type": "VARCHAR",
+            "description": "Only the exact value session qualifies"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            1,
+            "2026-06-01 00:00:00",
+            "session"
+          ],
+          [
+            2,
+            1,
+            "2026-06-07 23:59:00",
+            "session"
+          ],
+          [
+            3,
+            1,
+            "2026-06-08 00:00:00",
+            "session"
+          ],
+          [
+            4,
+            1,
+            "2026-06-21 23:59:00",
+            "session"
+          ],
+          [
+            5,
+            2,
+            "2026-06-01 23:00:00",
+            "session"
+          ],
+          [
+            6,
+            2,
+            "2026-06-09 00:00:00",
+            "session"
+          ],
+          [
+            7,
+            3,
+            "2026-06-14 10:00:00",
+            "session"
+          ],
+          [
+            8,
+            3,
+            "2026-06-21 23:59:00",
+            "session"
+          ],
+          [
+            9,
+            4,
+            "2026-06-18 12:00:00",
+            "session"
+          ],
+          [
+            10,
+            5,
+            "2026-06-22 00:00:00",
+            "session"
+          ],
+          [
+            11,
+            6,
+            "2026-06-17 00:00:00",
+            "session"
+          ],
+          [
+            12,
+            8,
+            "2026-06-07 00:00:00",
+            "purchase"
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS s03_events;\n\nDROP TABLE IF EXISTS s03_users;\n\nCREATE TABLE s03_users (\n  user_id INTEGER,\n  signup_at TIMESTAMP\n);\n\nINSERT INTO s03_users VALUES\n  (1, '2026-06-01 00:00:00'),\n  (2, '2026-06-02 00:00:00'),\n  (3, '2026-06-08 00:00:00'),\n  (4, '2026-06-10 00:00:00'),\n  (5, '2026-06-15 00:00:00'),\n  (6, '2026-06-16 00:00:00'),\n  (7, '2026-06-22 00:00:00'),\n  (8, '2026-05-31 00:00:00');\n\nCREATE TABLE s03_events (\n  event_id INTEGER,\n  user_id INTEGER,\n  occurred_at TIMESTAMP,\n  event_type VARCHAR\n);\n\nINSERT INTO s03_events VALUES\n  (1, 1, '2026-06-01 00:00:00', 'session'),\n  (2, 1, '2026-06-07 23:59:00', 'session'),\n  (3, 1, '2026-06-08 00:00:00', 'session'),\n  (4, 1, '2026-06-21 23:59:00', 'session'),\n  (5, 2, '2026-06-01 23:00:00', 'session'),\n  (6, 2, '2026-06-09 00:00:00', 'session'),\n  (7, 3, '2026-06-14 10:00:00', 'session'),\n  (8, 3, '2026-06-21 23:59:00', 'session'),\n  (9, 4, '2026-06-18 12:00:00', 'session'),\n  (10, 5, '2026-06-22 00:00:00', 'session'),\n  (11, 6, '2026-06-17 00:00:00', 'session'),\n  (12, 8, '2026-06-07 00:00:00', 'purchase');",
+    "starterSql": "-- Scaffold three windows per admitted user before aggregating cohort metrics.\nWITH weeks(week_number) AS (VALUES (0), (1), (2))\nSELECT u.user_id, u.signup_at, w.week_number\nFROM s03_users AS u CROSS JOIN weeks AS w\nWHERE u.signup_at < TIMESTAMP '2026-06-22 00:00:00'\nORDER BY u.user_id, w.week_number;",
+    "solutionSql": "WITH params AS (\n    SELECT TIMESTAMP '2026-06-22 00:00:00' AS cutoff\n), weeks(week_number) AS (\n    VALUES (0), (1), (2)\n), user_windows AS (\n    SELECT u.user_id,\n           CAST(DATE_TRUNC('week', u.signup_at) AS DATE) AS cohort_week,\n           w.week_number, p.cutoff,\n           u.signup_at + (7 * w.week_number) * INTERVAL '1 day' AS window_start,\n           u.signup_at + (7 * (w.week_number + 1)) * INTERVAL '1 day' AS window_end\n    FROM s03_users AS u\n    CROSS JOIN weeks AS w\n    CROSS JOIN params AS p\n    WHERE u.signup_at < p.cutoff\n), flags AS (\n    SELECT uw.*,\n           CASE WHEN uw.window_end <= uw.cutoff THEN 1 ELSE 0 END AS eligible,\n           CASE WHEN uw.window_end <= uw.cutoff AND EXISTS (\n               SELECT 1\n               FROM s03_events AS e\n               WHERE e.user_id = uw.user_id\n                 AND e.event_type = 'session'\n                 AND e.occurred_at >= uw.window_start\n                 AND e.occurred_at < uw.window_end\n                 AND e.occurred_at < uw.cutoff\n           ) THEN 1 ELSE 0 END AS retained\n    FROM user_windows AS uw\n)\nSELECT CAST(cohort_week AS VARCHAR) AS cohort_week, week_number,\n       SUM(eligible) AS eligible_users,\n       SUM(retained) AS retained_users,\n       ROUND(100.0 * SUM(retained) / NULLIF(SUM(eligible), 0), 2) AS retention_pct\nFROM flags\nGROUP BY cohort_week, week_number\nORDER BY cohort_week, week_number;",
+    "expected": {
+      "columns": [
+        "cohort_week",
+        "week_number",
+        "eligible_users",
+        "retained_users",
+        "retention_pct"
+      ],
+      "rows": [
+        [
+          "2026-05-25",
+          0,
+          1,
+          0,
+          0
+        ],
+        [
+          "2026-05-25",
+          1,
+          1,
+          0,
+          0
+        ],
+        [
+          "2026-05-25",
+          2,
+          1,
+          0,
+          0
+        ],
+        [
+          "2026-06-01",
+          0,
+          2,
+          1,
+          50
+        ],
+        [
+          "2026-06-01",
+          1,
+          2,
+          2,
+          100
+        ],
+        [
+          "2026-06-01",
+          2,
+          1,
+          1,
+          100
+        ],
+        [
+          "2026-06-08",
+          0,
+          2,
+          1,
+          50
+        ],
+        [
+          "2026-06-08",
+          1,
+          1,
+          1,
+          100
+        ],
+        [
+          "2026-06-08",
+          2,
+          0,
+          0,
+          null
+        ],
+        [
+          "2026-06-15",
+          0,
+          1,
+          0,
+          0
+        ],
+        [
+          "2026-06-15",
+          1,
+          0,
+          0,
+          null
+        ],
+        [
+          "2026-06-15",
+          2,
+          0,
+          0,
+          null
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Cross join admitted users with weeks 0, 1, and 2. Keeping those rows before the eligibility check ensures every observed cohort has all requested week rows.",
+      "Eligibility depends on each user's exact window end. This avoids right-censoring bias: users who have not had a full opportunity to return are removed from both the numerator and denominator.",
+      "EXISTS reduces any number of qualifying events to one retained flag. Half-open windows put a boundary event into exactly one anniversary week.",
+      "For cohort 2026-06-01, both users are eligible for weeks 0 and 1, but only user 1 is eligible for week 2. This yields 50%, 100%, and 100%. The June 15 cohort has one mature week-0 user with no qualifying session; later weeks have no eligible users."
+    ],
+    "hints": [
+      "Build the cohort label separately from the per-user anniversary windows. Generate weeks 0, 1, and 2 even if activity is absent.",
+      "Mark eligibility using window_end <= cutoff. Then test for at least one session inside each eligible half-open window; an EXISTS test avoids counting events as users.",
+      "Aggregate the eligibility and retained flags by cohort and week. Divide by eligible users, return NULL for a zero denominator, and preserve the zero-eligible rows."
+    ],
+    "pitfalls": [
+      "Using the full cohort size as every denominator penalizes users whose retention windows are incomplete.",
+      "Using calendar-week differences misclassifies events for users who signed up later in the week or later in the day.",
+      "Counting event rows inflates retention when a user has multiple sessions.",
+      "Filtering to eligible rows or joining only observed events drops requested zero-eligible or zero-retained rows.",
+      "Using BETWEEN includes the upper boundary and can count the same event in two windows."
+    ],
+    "wrongQueries": [
+      {
+        "label": "Uses total cohort size instead of mature-window eligibility",
+        "sql": "WITH params AS (\n    SELECT TIMESTAMP '2026-06-22 00:00:00' AS cutoff\n), weeks(week_number) AS (\n    VALUES (0), (1), (2)\n), user_windows AS (\n    SELECT u.user_id,\n           CAST(DATE_TRUNC('week', u.signup_at) AS DATE) AS cohort_week,\n           w.week_number, p.cutoff,\n           u.signup_at + (7 * w.week_number) * INTERVAL '1 day' AS window_start,\n           u.signup_at + (7 * (w.week_number + 1)) * INTERVAL '1 day' AS window_end\n    FROM s03_users AS u\n    CROSS JOIN weeks AS w\n    CROSS JOIN params AS p\n    WHERE u.signup_at < p.cutoff\n), flags AS (\n    SELECT uw.*,\n           CASE WHEN uw.window_end <= uw.cutoff THEN 1 ELSE 0 END AS eligible,\n           CASE WHEN uw.window_end <= uw.cutoff AND EXISTS (\n               SELECT 1\n               FROM s03_events AS e\n               WHERE e.user_id = uw.user_id\n                 AND e.event_type = 'session'\n                 AND e.occurred_at >= uw.window_start\n                 AND e.occurred_at < uw.window_end\n                 AND e.occurred_at < uw.cutoff\n           ) THEN 1 ELSE 0 END AS retained\n    FROM user_windows AS uw\n)\nSELECT CAST(cohort_week AS VARCHAR) AS cohort_week, week_number,\n       COUNT(*) AS eligible_users,\n       SUM(retained) AS retained_users,\n       ROUND(100.0 * SUM(retained) / COUNT(*), 2) AS retention_pct\nFROM flags\nGROUP BY cohort_week, week_number\nORDER BY cohort_week, week_number;"
+      }
+    ],
+    "rowExplanations": [
+      {
+        "key": "2026-05-25 / weeks 0\u20132",
+        "text": "User 8 is eligible for all three windows but has only a purchase event, so all three rates are 0%."
+      },
+      {
+        "key": "2026-06-01 / 0",
+        "text": "Users 1 and 2 are eligible. Only user 1 has a session in week 0; the pre-signup event for user 2 is excluded. 1/2 = 50%."
+      },
+      {
+        "key": "2026-06-01 / 1",
+        "text": "Both users have a session exactly at or within their individual week-1 windows. 2/2 = 100%."
+      },
+      {
+        "key": "2026-06-01 / 2",
+        "text": "Only user 1 has a fully observed third week, and that user returns. User 2's third week ends on June 23. 1/1 = 100%."
+      },
+      {
+        "key": "2026-06-08 / 0",
+        "text": "Both users 3 and 4 are eligible; only user 3 has a session in week 0. 1/2 = 50%."
+      },
+      {
+        "key": "2026-06-08 / 1",
+        "text": "Only user 3 is eligible and returned. User 4's partial-week session does not enter either count."
+      },
+      {
+        "key": "2026-06-08 / 2",
+        "text": "Neither user has completed week 2, so the counts are zero and the percentage is NULL."
+      },
+      {
+        "key": "2026-06-15 / 0",
+        "text": "Only user 5 has completed week 0. That user's event is exactly at the cutoff and excluded. User 6 is not yet eligible despite a session."
+      },
+      {
+        "key": "2026-06-15 / weeks 1\u20132",
+        "text": "No user has completed these windows, so both rows remain with zero counts and NULL percentages."
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Exact signup times differ from calendar-week buckets",
+        "setupSql": "DROP TABLE IF EXISTS s03_events;\n\nDROP TABLE IF EXISTS s03_users;\n\nCREATE TABLE s03_users (\n  user_id INTEGER,\n  signup_at TIMESTAMP\n);\n\nINSERT INTO s03_users VALUES\n  (1, '2026-06-01 12:00:00'),\n  (2, '2026-06-07 18:00:00'),\n  (3, '2026-06-15 00:00:00');\n\nCREATE TABLE s03_events (\n  event_id INTEGER,\n  user_id INTEGER,\n  occurred_at TIMESTAMP,\n  event_type VARCHAR\n);\n\nINSERT INTO s03_events VALUES\n  (1, 1, '2026-06-08 11:59:00', 'session'),\n  (2, 1, '2026-06-08 12:00:00', 'session'),\n  (3, 2, '2026-06-14 17:00:00', 'session'),\n  (4, 2, '2026-06-21 18:00:00', 'session'),\n  (5, 3, '2026-06-21 23:59:00', 'session');",
+        "expected": {
+          "columns": [
+            "cohort_week",
+            "week_number",
+            "eligible_users",
+            "retained_users",
+            "retention_pct"
+          ],
+          "rows": [
+            [
+              "2026-06-01",
+              0,
+              2,
+              2,
+              100
+            ],
+            [
+              "2026-06-01",
+              1,
+              2,
+              1,
+              50
+            ],
+            [
+              "2026-06-01",
+              2,
+              0,
+              0,
+              null
+            ],
+            [
+              "2026-06-15",
+              0,
+              1,
+              1,
+              100
+            ],
+            [
+              "2026-06-15",
+              1,
+              0,
+              0,
+              null
+            ],
+            [
+              "2026-06-15",
+              2,
+              0,
+              0,
+              null
+            ]
+          ]
+        },
+        "explanation": "The 11:59 session is still user 1's week 0; the 12:00 session starts week 1. User 2's June 21 18:00 event starts an incomplete week 2, so it cannot count. User 1's week 2 ends twelve hours after the cutoff."
+      },
+      {
+        "label": "Duplicates, cutoff events, unknown users, and pre-signup activity",
+        "setupSql": "DROP TABLE IF EXISTS s03_events;\n\nDROP TABLE IF EXISTS s03_users;\n\nCREATE TABLE s03_users (\n  user_id INTEGER,\n  signup_at TIMESTAMP\n);\n\nINSERT INTO s03_users VALUES\n  (1, '2026-06-01 00:00:00'),\n  (2, '2026-06-01 00:00:00'),\n  (3, '2026-06-22 00:00:00');\n\nCREATE TABLE s03_events (\n  event_id INTEGER,\n  user_id INTEGER,\n  occurred_at TIMESTAMP,\n  event_type VARCHAR\n);\n\nINSERT INTO s03_events VALUES\n  (1, 1, '2026-06-08 00:00:00', 'session'),\n  (2, 1, '2026-06-08 10:00:00', 'session'),\n  (3, 1, '2026-05-31 23:59:00', 'session'),\n  (4, 2, '2026-06-01 00:00:00', 'purchase'),\n  (5, 2, '2026-06-22 00:00:00', 'session'),\n  (6, 999, '2026-06-01 00:00:00', 'session'),\n  (7, 3, '2026-06-22 00:00:00', 'session'),\n  (8, NULL, '2026-06-02 00:00:00', 'session');",
+        "expected": {
+          "columns": [
+            "cohort_week",
+            "week_number",
+            "eligible_users",
+            "retained_users",
+            "retention_pct"
+          ],
+          "rows": [
+            [
+              "2026-06-01",
+              0,
+              2,
+              0,
+              0
+            ],
+            [
+              "2026-06-01",
+              1,
+              2,
+              1,
+              50
+            ],
+            [
+              "2026-06-01",
+              2,
+              2,
+              0,
+              0
+            ]
+          ]
+        },
+        "explanation": "Only users 1 and 2 belong to an admitted cohort, and both are eligible for all three windows. Two sessions for user 1 still produce one retained user in week 1. All other events are excluded."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB window functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/window_functions"
+      }
+    ]
+  },
+  {
+    "id": "04-inventory-breaches",
+    "title": "Find the first inventory deficit episode",
+    "difficulty": "Hard",
+    "tags": [
+      "Running balances",
+      "Window functions",
+      "Temporal boundaries",
+      "Atomic event groups"
+    ],
+    "prompt": "An inventory team wants the first out-of-stock deficit episode for every SKU/warehouse pair before the report cutoff, 2026-01-03 00:00:00 UTC. Starting from its nonnegative snapshot quantity, apply eligible inventory movements and report the start, recovery, and deepest negative balance of only the first episode. Return sku, warehouse, breach_start_utc, recovered_at_utc, lowest_balance in that order. Format the two timestamps as VARCHAR; leave recovered_at_utc NULL if the first episode is still open at cutoff. Omit pairs that never become negative. Sort by sku, then warehouse, ascending.",
+    "businessRules": [
+      "Each opening snapshot already includes every movement at or before snapshot_at. Include movements strictly after that pair's snapshot and strictly before 2026-01-03 00:00:00 UTC.",
+      "Every timestamp is a timezone-naive TIMESTAMP interpreted as UTC. Do not convert timezones or truncate timestamps to dates.",
+      "For one SKU/warehouse, all movements with exactly the same timestamp are atomic: sum their deltas before evaluating the resulting balance. movement_id is an identifier, not a business ordering rule.",
+      "An episode begins when the post-timestamp balance is strictly negative. A balance of zero or greater ends it. Nonnegative opening quantities guarantee the first negative timestamp is the first episode's start.",
+      "The first episode's lowest_balance uses states from its start up to, but not including, its recovery timestamp. Later deficit episodes must not affect the answer.",
+      "Only SKU/warehouse pairs present in inv04_openings are in scope. All input key, quantity, and timestamp columns are non-NULL; a missing recovery is represented by SQL NULL."
+    ],
+    "tables": [
+      {
+        "name": "inv04_openings",
+        "description": "One nonnegative balance snapshot per SKU/warehouse. Snapshot-time movements are already included.",
+        "columns": [
+          {
+            "name": "sku",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "warehouse",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "snapshot_at",
+            "type": "TIMESTAMP"
+          },
+          {
+            "name": "opening_qty",
+            "type": "BIGINT"
+          }
+        ],
+        "rows": [
+          [
+            "A",
+            "W1",
+            "2026-01-01 00:00:00",
+            5
+          ],
+          [
+            "B",
+            "W1",
+            "2026-01-01 00:00:00",
+            2
+          ],
+          [
+            "A",
+            "W2",
+            "2026-01-01 00:00:00",
+            0
+          ],
+          [
+            "C",
+            "W1",
+            "2026-01-01 00:00:00",
+            3
+          ]
+        ]
+      },
+      {
+        "name": "inv04_movements",
+        "description": "Signed unit movements; duplicate timestamps represent one atomic business instant.",
+        "columns": [
+          {
+            "name": "movement_id",
+            "type": "BIGINT"
+          },
+          {
+            "name": "sku",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "warehouse",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "occurred_at",
+            "type": "TIMESTAMP"
+          },
+          {
+            "name": "qty_delta",
+            "type": "BIGINT"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            "A",
+            "W1",
+            "2026-01-01 08:00:00",
+            -7
+          ],
+          [
+            2,
+            "A",
+            "W1",
+            "2026-01-01 09:00:00",
+            1
+          ],
+          [
+            3,
+            "A",
+            "W1",
+            "2026-01-01 10:00:00",
+            1
+          ],
+          [
+            4,
+            "A",
+            "W1",
+            "2026-01-01 12:00:00",
+            -4
+          ],
+          [
+            5,
+            "A",
+            "W1",
+            "2026-01-01 13:00:00",
+            10
+          ],
+          [
+            6,
+            "B",
+            "W1",
+            "2026-01-01 08:00:00",
+            -5
+          ],
+          [
+            7,
+            "B",
+            "W1",
+            "2026-01-01 08:00:00",
+            4
+          ],
+          [
+            8,
+            "B",
+            "W1",
+            "2026-01-01 09:00:00",
+            -2
+          ],
+          [
+            9,
+            "B",
+            "W1",
+            "2026-01-02 09:00:00",
+            -3
+          ],
+          [
+            10,
+            "B",
+            "W1",
+            "2026-01-03 00:00:00",
+            10
+          ],
+          [
+            11,
+            "A",
+            "W2",
+            "2026-01-01 06:00:00",
+            -1
+          ],
+          [
+            12,
+            "A",
+            "W2",
+            "2026-01-01 07:00:00",
+            2
+          ],
+          [
+            13,
+            "C",
+            "W1",
+            "2026-01-01 08:00:00",
+            -3
+          ],
+          [
+            14,
+            "C",
+            "W1",
+            "2026-01-01 09:00:00",
+            1
+          ],
+          [
+            15,
+            "C",
+            "W1",
+            "2026-01-01 00:00:00",
+            -100
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS inv04_movements;\nDROP TABLE IF EXISTS inv04_openings;\nCREATE TABLE inv04_openings (\n  sku VARCHAR NOT NULL,\n  warehouse VARCHAR NOT NULL,\n  snapshot_at TIMESTAMP NOT NULL,\n  opening_qty BIGINT NOT NULL CHECK (opening_qty >= 0),\n  PRIMARY KEY (sku, warehouse)\n);\nCREATE TABLE inv04_movements (\n  movement_id BIGINT PRIMARY KEY,\n  sku VARCHAR NOT NULL,\n  warehouse VARCHAR NOT NULL,\n  occurred_at TIMESTAMP NOT NULL,\n  qty_delta BIGINT NOT NULL\n);\nINSERT INTO inv04_openings VALUES\n  ('A', 'W1', '2026-01-01 00:00:00', 5),\n  ('B', 'W1', '2026-01-01 00:00:00', 2),\n  ('A', 'W2', '2026-01-01 00:00:00', 0),\n  ('C', 'W1', '2026-01-01 00:00:00', 3);\nINSERT INTO inv04_movements VALUES\n  (1, 'A', 'W1', '2026-01-01 08:00:00', -7),\n  (2, 'A', 'W1', '2026-01-01 09:00:00', 1),\n  (3, 'A', 'W1', '2026-01-01 10:00:00', 1),\n  (4, 'A', 'W1', '2026-01-01 12:00:00', -4),\n  (5, 'A', 'W1', '2026-01-01 13:00:00', 10),\n  (6, 'B', 'W1', '2026-01-01 08:00:00', -5),\n  (7, 'B', 'W1', '2026-01-01 08:00:00', 4),\n  (8, 'B', 'W1', '2026-01-01 09:00:00', -2),\n  (9, 'B', 'W1', '2026-01-02 09:00:00', -3),\n  (10, 'B', 'W1', '2026-01-03 00:00:00', 10),\n  (11, 'A', 'W2', '2026-01-01 06:00:00', -1),\n  (12, 'A', 'W2', '2026-01-01 07:00:00', 2),\n  (13, 'C', 'W1', '2026-01-01 08:00:00', -3),\n  (14, 'C', 'W1', '2026-01-01 09:00:00', 1),\n  (15, 'C', 'W1', '2026-01-01 00:00:00', -100);\n",
+    "starterSql": "-- Build timestamp-level deltas, then running balances and the first episode.\nSELECT sku, warehouse,\n       CAST(NULL AS VARCHAR) AS breach_start_utc,\n       CAST(NULL AS VARCHAR) AS recovered_at_utc,\n       CAST(NULL AS BIGINT) AS lowest_balance\nFROM inv04_openings\nWHERE FALSE\nORDER BY sku, warehouse;",
+    "solutionSql": "WITH timestamp_deltas AS (\n  SELECT m.sku, m.warehouse, m.occurred_at,\n         o.opening_qty, SUM(m.qty_delta) AS qty_delta\n  FROM inv04_movements AS m\n  JOIN inv04_openings AS o\n    ON o.sku = m.sku AND o.warehouse = m.warehouse\n  WHERE m.occurred_at > o.snapshot_at\n    AND m.occurred_at < TIMESTAMP '2026-01-03 00:00:00'\n  GROUP BY m.sku, m.warehouse, m.occurred_at, o.opening_qty\n), balances AS (\n  SELECT sku, warehouse, occurred_at,\n         opening_qty + SUM(qty_delta) OVER (\n           PARTITION BY sku, warehouse\n           ORDER BY occurred_at\n           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n         ) AS balance\n  FROM timestamp_deltas\n), first_breach AS (\n  SELECT sku, warehouse, MIN(occurred_at) AS breach_at\n  FROM balances\n  WHERE balance < 0\n  GROUP BY sku, warehouse\n), first_recovery AS (\n  SELECT f.sku, f.warehouse, f.breach_at,\n         MIN(b.occurred_at) AS recovered_at\n  FROM first_breach AS f\n  LEFT JOIN balances AS b\n    ON b.sku = f.sku AND b.warehouse = f.warehouse\n   AND b.occurred_at > f.breach_at\n   AND b.balance >= 0\n  GROUP BY f.sku, f.warehouse, f.breach_at\n)\nSELECT r.sku, r.warehouse,\n       CAST(r.breach_at AS VARCHAR) AS breach_start_utc,\n       CAST(r.recovered_at AS VARCHAR) AS recovered_at_utc,\n       MIN(b.balance) AS lowest_balance\nFROM first_recovery AS r\nJOIN balances AS b\n  ON b.sku = r.sku AND b.warehouse = r.warehouse\n AND b.occurred_at >= r.breach_at\n AND (r.recovered_at IS NULL OR b.occurred_at < r.recovered_at)\nGROUP BY r.sku, r.warehouse, r.breach_at, r.recovered_at\nORDER BY r.sku, r.warehouse;",
+    "expected": {
+      "columns": [
+        "sku",
+        "warehouse",
+        "breach_start_utc",
+        "recovered_at_utc",
+        "lowest_balance"
+      ],
+      "rows": [
+        [
+          "A",
+          "W1",
+          "2026-01-01 08:00:00",
+          "2026-01-01 10:00:00",
+          -2
+        ],
+        [
+          "A",
+          "W2",
+          "2026-01-01 06:00:00",
+          "2026-01-01 07:00:00",
+          -1
+        ],
+        [
+          "B",
+          "W1",
+          "2026-01-01 09:00:00",
+          null,
+          -4
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Filter the ledger using each pair's snapshot and the exclusive report cutoff, then collapse same-timestamp movements before computing a running SUM.",
+      "Add opening_qty to the cumulative delta. Because every opening is nonnegative, the earliest negative state is the first breach without needing to label all later episodes.",
+      "For each first breach, find the first later nonnegative state. LEFT JOIN preserves episodes without a recovery.",
+      "Compute the minimum balance only inside the first episode. A/W1 reaches -4 in a later episode, so its requested minimum is still -2."
+    ],
+    "hints": [
+      "What is the correct business grain before you calculate a running total: a ledger row or a SKU/warehouse/timestamp?",
+      "Once you have post-timestamp balances, the first negative timestamp identifies the first episode. Search for the earliest nonnegative state after it.",
+      "Join balances back to the start/recovery interval using start <= timestamp and timestamp < recovery; if recovery is NULL, keep every remaining eligible state."
+    ],
+    "pitfalls": [
+      "Ordering tied movements by movement_id creates transient deficits the business never observed.",
+      "Treating zero as still breached delays recovery.",
+      "Including snapshot-time or cutoff-time movements violates the interval boundaries.",
+      "Taking the minimum over every negative episode reports the wrong depth for the first episode."
+    ],
+    "wrongQueries": [
+      {
+        "label": "Evaluate ledger rows individually instead of atomic timestamps",
+        "sql": "WITH timestamp_deltas AS (\n  SELECT m.sku, m.warehouse, m.occurred_at, m.movement_id,\n         o.opening_qty, m.qty_delta\n  FROM inv04_movements AS m\n  JOIN inv04_openings AS o\n    ON o.sku = m.sku AND o.warehouse = m.warehouse\n  WHERE m.occurred_at > o.snapshot_at\n    AND m.occurred_at < TIMESTAMP '2026-01-03 00:00:00'\n), balances AS (\n  SELECT sku, warehouse, occurred_at,\n         opening_qty + SUM(qty_delta) OVER (\n           PARTITION BY sku, warehouse\n           ORDER BY occurred_at, movement_id\n           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n         ) AS balance\n  FROM timestamp_deltas\n), first_breach AS (\n  SELECT sku, warehouse, MIN(occurred_at) AS breach_at\n  FROM balances\n  WHERE balance < 0\n  GROUP BY sku, warehouse\n), first_recovery AS (\n  SELECT f.sku, f.warehouse, f.breach_at,\n         MIN(b.occurred_at) AS recovered_at\n  FROM first_breach AS f\n  LEFT JOIN balances AS b\n    ON b.sku = f.sku AND b.warehouse = f.warehouse\n   AND b.occurred_at > f.breach_at\n   AND b.balance >= 0\n  GROUP BY f.sku, f.warehouse, f.breach_at\n)\nSELECT r.sku, r.warehouse,\n       CAST(r.breach_at AS VARCHAR) AS breach_start_utc,\n       CAST(r.recovered_at AS VARCHAR) AS recovered_at_utc,\n       MIN(b.balance) AS lowest_balance\nFROM first_recovery AS r\nJOIN balances AS b\n  ON b.sku = r.sku AND b.warehouse = r.warehouse\n AND b.occurred_at >= r.breach_at\n AND (r.recovered_at IS NULL OR b.occurred_at < r.recovered_at)\nGROUP BY r.sku, r.warehouse, r.breach_at, r.recovered_at\nORDER BY r.sku, r.warehouse;"
+      },
+      {
+        "label": "Take the worst balance after the first breach, including later episodes",
+        "sql": "WITH timestamp_deltas AS (\n  SELECT m.sku, m.warehouse, m.occurred_at,\n         o.opening_qty, SUM(m.qty_delta) AS qty_delta\n  FROM inv04_movements AS m\n  JOIN inv04_openings AS o\n    ON o.sku = m.sku AND o.warehouse = m.warehouse\n  WHERE m.occurred_at > o.snapshot_at\n    AND m.occurred_at < TIMESTAMP '2026-01-03 00:00:00'\n  GROUP BY m.sku, m.warehouse, m.occurred_at, o.opening_qty\n), balances AS (\n  SELECT sku, warehouse, occurred_at,\n         opening_qty + SUM(qty_delta) OVER (\n           PARTITION BY sku, warehouse\n           ORDER BY occurred_at\n           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n         ) AS balance\n  FROM timestamp_deltas\n), first_breach AS (\n  SELECT sku, warehouse, MIN(occurred_at) AS breach_at\n  FROM balances\n  WHERE balance < 0\n  GROUP BY sku, warehouse\n), first_recovery AS (\n  SELECT f.sku, f.warehouse, f.breach_at,\n         MIN(b.occurred_at) AS recovered_at\n  FROM first_breach AS f\n  LEFT JOIN balances AS b\n    ON b.sku = f.sku AND b.warehouse = f.warehouse\n   AND b.occurred_at > f.breach_at\n   AND b.balance >= 0\n  GROUP BY f.sku, f.warehouse, f.breach_at\n)\nSELECT r.sku, r.warehouse,\n       CAST(r.breach_at AS VARCHAR) AS breach_start_utc,\n       CAST(r.recovered_at AS VARCHAR) AS recovered_at_utc,\n       MIN(b.balance) AS lowest_balance\nFROM first_recovery AS r\nJOIN balances AS b\n  ON b.sku = r.sku AND b.warehouse = r.warehouse\n AND b.occurred_at >= r.breach_at\n\nGROUP BY r.sku, r.warehouse, r.breach_at, r.recovered_at\nORDER BY r.sku, r.warehouse;"
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Atomic cancellation and a deeper second episode",
+        "setupSql": "DROP TABLE IF EXISTS inv04_movements;\nDROP TABLE IF EXISTS inv04_openings;\nCREATE TABLE inv04_openings (\n  sku VARCHAR NOT NULL,\n  warehouse VARCHAR NOT NULL,\n  snapshot_at TIMESTAMP NOT NULL,\n  opening_qty BIGINT NOT NULL CHECK (opening_qty >= 0),\n  PRIMARY KEY (sku, warehouse)\n);\nCREATE TABLE inv04_movements (\n  movement_id BIGINT PRIMARY KEY,\n  sku VARCHAR NOT NULL,\n  warehouse VARCHAR NOT NULL,\n  occurred_at TIMESTAMP NOT NULL,\n  qty_delta BIGINT NOT NULL\n);\nINSERT INTO inv04_openings VALUES\n  ('TIE', 'W1', '2026-01-01 00:00:00', 1),\n  ('RETURN', 'W1', '2026-01-01 00:00:00', 0);\nINSERT INTO inv04_movements VALUES\n  (1, 'TIE', 'W1', '2026-01-01 01:00:00', -4),\n  (2, 'TIE', 'W1', '2026-01-01 01:00:00', 4),\n  (3, 'RETURN', 'W1', '2026-01-01 01:00:00', -2),\n  (4, 'RETURN', 'W1', '2026-01-01 02:00:00', 2),\n  (5, 'RETURN', 'W1', '2026-01-01 03:00:00', -5),\n  (6, 'RETURN', 'W1', '2026-01-01 04:00:00', 8);\n",
+        "expected": {
+          "columns": [
+            "sku",
+            "warehouse",
+            "breach_start_utc",
+            "recovered_at_utc",
+            "lowest_balance"
+          ],
+          "rows": [
+            [
+              "RETURN",
+              "W1",
+              "2026-01-01 01:00:00",
+              "2026-01-01 02:00:00",
+              -2
+            ]
+          ]
+        },
+        "explanation": "TIE stays at +1 because -4 and +4 are atomic. RETURN reaches -2, recovers exactly to zero, and only later reaches -5; only its first episode is returned."
+      },
+      {
+        "label": "Snapshot exclusion, exclusive cutoff, and an open episode",
+        "setupSql": "DROP TABLE IF EXISTS inv04_movements;\nDROP TABLE IF EXISTS inv04_openings;\nCREATE TABLE inv04_openings (\n  sku VARCHAR NOT NULL,\n  warehouse VARCHAR NOT NULL,\n  snapshot_at TIMESTAMP NOT NULL,\n  opening_qty BIGINT NOT NULL CHECK (opening_qty >= 0),\n  PRIMARY KEY (sku, warehouse)\n);\nCREATE TABLE inv04_movements (\n  movement_id BIGINT PRIMARY KEY,\n  sku VARCHAR NOT NULL,\n  warehouse VARCHAR NOT NULL,\n  occurred_at TIMESTAMP NOT NULL,\n  qty_delta BIGINT NOT NULL\n);\nINSERT INTO inv04_openings VALUES\n  ('EDGE', 'W2', '2026-01-01 00:00:00', 3),\n  ('OPEN', 'W1', '2026-01-01 00:00:00', 1),\n  ('QUIET', 'W1', '2026-01-01 00:00:00', 0);\nINSERT INTO inv04_movements VALUES\n  (1, 'EDGE', 'W2', '2025-12-31 23:59:59', -99),\n  (2, 'EDGE', 'W2', '2026-01-01 00:00:00', -99),\n  (3, 'EDGE', 'W2', '2026-01-01 00:00:01', -4),\n  (4, 'EDGE', 'W2', '2026-01-02 23:59:59', 1),\n  (5, 'OPEN', 'W1', '2026-01-02 23:00:00', -3),\n  (6, 'OPEN', 'W1', '2026-01-03 00:00:00', 5),\n  (7, 'QUIET', 'W1', '2026-01-01 02:00:00', 0);\n",
+        "expected": {
+          "columns": [
+            "sku",
+            "warehouse",
+            "breach_start_utc",
+            "recovered_at_utc",
+            "lowest_balance"
+          ],
+          "rows": [
+            [
+              "EDGE",
+              "W2",
+              "2026-01-01 00:00:01",
+              "2026-01-02 23:59:59",
+              -1
+            ],
+            [
+              "OPEN",
+              "W1",
+              "2026-01-02 23:00:00",
+              null,
+              -2
+            ]
+          ]
+        },
+        "explanation": "EDGE ignores both older and snapshot-time movements and recovers a second before cutoff. OPEN's exact-cutoff receipt is excluded, so its recovery remains NULL. QUIET stays at zero."
+      }
+    ],
+    "rowExplanations": [
+      {
+        "key": "A|W1",
+        "text": "5 -> -2 -> -1 -> 0: breach at 08:00, recovery at 10:00, first-episode minimum -2. The later -4 is excluded."
+      },
+      {
+        "key": "A|W2",
+        "text": "0 -> -1 -> 1: breach at 06:00, recovery at 07:00, minimum -1."
+      },
+      {
+        "key": "B|W1",
+        "text": "The tied 08:00 movements sum to -1, leaving +1. The 09:00 movement creates -1; the next day deepens it to -4. The receipt at cutoff cannot close the episode."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB window functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/window_functions"
+      }
+    ]
+  },
+  {
+    "id": "05-source-reconciliation",
+    "title": "Reconcile duplicate rows across three sources",
+    "difficulty": "Hard",
+    "tags": [
+      "Reconciliation",
+      "Null semantics",
+      "Duplicate matching",
+      "Conditional aggregation"
+    ],
+    "prompt": "Reconcile ERP, payment-gateway, and bank lines without losing duplicate multiplicity. Create deterministic matching slots within each normalized reference/currency/amount key, and return only slots missing at least one source. Return normalized_ref, currency, amount_cents, occurrence_no, erp_row_id, gateway_row_id, bank_row_id, missing_sources in that order. Sort by normalized_ref ascending with NULL first, then currency, amount_cents, and occurrence_no ascending. missing_sources is a comma-separated string in the fixed order erp,gateway,bank, with no spaces.",
+    "businessRules": [
+      "Normalize external_ref using UPPER(TRIM(external_ref)); convert the resulting empty string to NULL. Normalize currency using UPPER(TRIM(currency)).",
+      "The complete matching key is (normalized_ref, normalized currency, amount_cents). Equal reference text alone is insufficient: different currencies or amounts belong to different keys.",
+      "For this report, NULL references form one valid anonymous bucket within each currency/amount key. NULL therefore matches NULL; blank references normalize into the same bucket. This is a specified reporting match, not proof of transaction identity.",
+      "Within each source and complete key, sort rows by ascending row_id and assign occurrence numbers starting at 1. Match occurrence 1 across sources, occurrence 2 across sources, and so on; never use one row more than once.",
+      "Return every slot missing one or two sources. Omit slots with all three sources present. Missing row IDs are SQL NULL; zero and negative amounts are valid values and must not be treated as missing.",
+      "row_id is globally unique and non-NULL. source, currency, and amount_cents are non-NULL; normalized currency is nonempty. There is no timezone or date-based matching.",
+      "source is exactly one of 'erp', 'gateway', or 'bank'. Source names do not need normalization."
+    ],
+    "tables": [
+      {
+        "name": "rec05_lines",
+        "description": "Three source extracts in one inspectable fixture; every source row remains distinct.",
+        "columns": [
+          {
+            "name": "row_id",
+            "type": "BIGINT"
+          },
+          {
+            "name": "source",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "external_ref",
+            "type": "VARCHAR",
+            "description": "Nullable; trim and case-normalize before matching."
+          },
+          {
+            "name": "currency",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "amount_cents",
+            "type": "BIGINT"
+          }
+        ],
+        "rows": [
+          [
+            101,
+            "erp",
+            " a-1 ",
+            "usd",
+            1000
+          ],
+          [
+            102,
+            "erp",
+            "A-1",
+            "USD",
+            1000
+          ],
+          [
+            103,
+            "erp",
+            "b-2",
+            "eur",
+            2500
+          ],
+          [
+            104,
+            "erp",
+            null,
+            "USD",
+            500
+          ],
+          [
+            105,
+            "erp",
+            "  ",
+            "USD",
+            500
+          ],
+          [
+            106,
+            "erp",
+            "C-3",
+            "USD",
+            -200
+          ],
+          [
+            201,
+            "gateway",
+            "A-1",
+            " usd ",
+            1000
+          ],
+          [
+            202,
+            "gateway",
+            "A-1",
+            "USD",
+            1000
+          ],
+          [
+            203,
+            "gateway",
+            "B-2",
+            "EUR",
+            2500
+          ],
+          [
+            204,
+            "gateway",
+            null,
+            "USD",
+            500
+          ],
+          [
+            205,
+            "gateway",
+            "C-3",
+            "USD",
+            -200
+          ],
+          [
+            206,
+            "gateway",
+            "D-4",
+            "USD",
+            700
+          ],
+          [
+            301,
+            "bank",
+            "A-1",
+            "USD",
+            1000
+          ],
+          [
+            302,
+            "bank",
+            "B-2",
+            "EUR",
+            2400
+          ],
+          [
+            303,
+            "bank",
+            null,
+            "USD",
+            500
+          ],
+          [
+            304,
+            "bank",
+            "",
+            "USD",
+            500
+          ],
+          [
+            305,
+            "bank",
+            "C-3",
+            "USD",
+            -200
+          ],
+          [
+            306,
+            "bank",
+            "E-5",
+            "GBP",
+            900
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS rec05_lines;\nCREATE TABLE rec05_lines (\n  row_id BIGINT PRIMARY KEY,\n  source VARCHAR NOT NULL CHECK (source IN ('erp', 'gateway', 'bank')),\n  external_ref VARCHAR,\n  currency VARCHAR NOT NULL,\n  amount_cents BIGINT NOT NULL\n);\nINSERT INTO rec05_lines VALUES\n  (101, 'erp', ' a-1 ', 'usd', 1000),\n  (102, 'erp', 'A-1', 'USD', 1000),\n  (103, 'erp', 'b-2', 'eur', 2500),\n  (104, 'erp', NULL, 'USD', 500),\n  (105, 'erp', '  ', 'USD', 500),\n  (106, 'erp', 'C-3', 'USD', -200),\n  (201, 'gateway', 'A-1', ' usd ', 1000),\n  (202, 'gateway', 'A-1', 'USD', 1000),\n  (203, 'gateway', 'B-2', 'EUR', 2500),\n  (204, 'gateway', NULL, 'USD', 500),\n  (205, 'gateway', 'C-3', 'USD', -200),\n  (206, 'gateway', 'D-4', 'USD', 700),\n  (301, 'bank', 'A-1', 'USD', 1000),\n  (302, 'bank', 'B-2', 'EUR', 2400),\n  (303, 'bank', NULL, 'USD', 500),\n  (304, 'bank', '', 'USD', 500),\n  (305, 'bank', 'C-3', 'USD', -200),\n  (306, 'bank', 'E-5', 'GBP', 900);\n",
+    "starterSql": "-- Normalize keys, number duplicate occurrences per source, then align slots.\nSELECT CAST(NULL AS VARCHAR) AS normalized_ref,\n       CAST(NULL AS VARCHAR) AS currency,\n       CAST(NULL AS BIGINT) AS amount_cents,\n       CAST(NULL AS BIGINT) AS occurrence_no,\n       CAST(NULL AS BIGINT) AS erp_row_id,\n       CAST(NULL AS BIGINT) AS gateway_row_id,\n       CAST(NULL AS BIGINT) AS bank_row_id,\n       CAST(NULL AS VARCHAR) AS missing_sources\nWHERE FALSE;",
+    "solutionSql": "WITH normalized AS (\n  SELECT row_id, source,\n         NULLIF(UPPER(TRIM(external_ref)), '') AS normalized_ref,\n         UPPER(TRIM(currency)) AS currency,\n         amount_cents\n  FROM rec05_lines\n), numbered AS (\n  SELECT *,\n         ROW_NUMBER() OVER (\n           PARTITION BY source, normalized_ref, currency, amount_cents\n           ORDER BY row_id\n         ) AS occurrence_no\n  FROM normalized\n), aligned AS (\n  SELECT normalized_ref, currency, amount_cents, occurrence_no,\n         MAX(CASE WHEN source = 'erp' THEN row_id END) AS erp_row_id,\n         MAX(CASE WHEN source = 'gateway' THEN row_id END) AS gateway_row_id,\n         MAX(CASE WHEN source = 'bank' THEN row_id END) AS bank_row_id\n  FROM numbered\n  GROUP BY normalized_ref, currency, amount_cents, occurrence_no\n)\nSELECT normalized_ref, currency, amount_cents, occurrence_no,\n       erp_row_id, gateway_row_id, bank_row_id,\n       CONCAT_WS(',',\n         CASE WHEN erp_row_id IS NULL THEN 'erp' END,\n         CASE WHEN gateway_row_id IS NULL THEN 'gateway' END,\n         CASE WHEN bank_row_id IS NULL THEN 'bank' END\n       ) AS missing_sources\nFROM aligned\nWHERE erp_row_id IS NULL OR gateway_row_id IS NULL OR bank_row_id IS NULL\nORDER BY normalized_ref ASC NULLS FIRST,\n         currency ASC, amount_cents ASC, occurrence_no ASC;",
+    "expected": {
+      "columns": [
+        "normalized_ref",
+        "currency",
+        "amount_cents",
+        "occurrence_no",
+        "erp_row_id",
+        "gateway_row_id",
+        "bank_row_id",
+        "missing_sources"
+      ],
+      "rows": [
+        [
+          null,
+          "USD",
+          500,
+          2,
+          105,
+          null,
+          304,
+          "gateway"
+        ],
+        [
+          "A-1",
+          "USD",
+          1000,
+          2,
+          102,
+          202,
+          null,
+          "bank"
+        ],
+        [
+          "B-2",
+          "EUR",
+          2400,
+          1,
+          null,
+          null,
+          302,
+          "erp,gateway"
+        ],
+        [
+          "B-2",
+          "EUR",
+          2500,
+          1,
+          103,
+          203,
+          null,
+          "bank"
+        ],
+        [
+          "D-4",
+          "USD",
+          700,
+          1,
+          null,
+          206,
+          null,
+          "erp,bank"
+        ],
+        [
+          "E-5",
+          "GBP",
+          900,
+          1,
+          null,
+          null,
+          306,
+          "erp,gateway"
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Normalize before numbering. Otherwise whitespace or case variants receive different occurrence sequences.",
+      "ROW_NUMBER partitions by source plus the entire normalized matching key. This makes duplicates deterministic without treating them as interchangeable unlimited matches.",
+      "Group by the matching key and occurrence_no, then pivot each source row_id using conditional MAX. SQL grouping places NULL references in the same group, which implements the required anonymous-bucket behavior.",
+      "Because each source contributes at most one row to a slot, the pivot is lossless. Keep incomplete slots and construct missing_sources in the stated order.",
+      "B-2 does not have one amount-mismatch output row: its 2400 bank line and 2500 ERP/gateway lines belong to two separate incomplete slots."
+    ],
+    "hints": [
+      "DISTINCT and a simple join both lose important information when the same key appears more than once. How can each duplicate receive a reusable matching position?",
+      "Use ROW_NUMBER within (source, normalized_ref, currency, amount_cents), ordered by row_id. NULL references must share a partition.",
+      "After numbering, aggregate by the key plus occurrence number and pivot source IDs. Retain groups where at least one source ID is NULL."
+    ],
+    "pitfalls": [
+      "Deduplicating the extracts hides missing second or third copies.",
+      "Joining raw duplicate keys produces a many-to-many multiplication.",
+      "Using ordinary = between nullable reference keys fails to match anonymous buckets; use null-safe comparisons or grouping.",
+      "Joining only by reference incorrectly reconciles different currencies or amounts.",
+      "Treating amount zero, negative values, or blank reference text as absent rows loses valid records."
+    ],
+    "wrongQueries": [
+      {
+        "label": "Collapse each matching key without preserving duplicate slots",
+        "sql": "WITH normalized AS (\n  SELECT row_id, source,\n         NULLIF(UPPER(TRIM(external_ref)), '') AS normalized_ref,\n         UPPER(TRIM(currency)) AS currency,\n         amount_cents\n  FROM rec05_lines\n), aligned AS (\n  SELECT normalized_ref, currency, amount_cents,\n         CAST(1 AS BIGINT) AS occurrence_no,\n         MAX(CASE WHEN source = 'erp' THEN row_id END) AS erp_row_id,\n         MAX(CASE WHEN source = 'gateway' THEN row_id END) AS gateway_row_id,\n         MAX(CASE WHEN source = 'bank' THEN row_id END) AS bank_row_id\n  FROM normalized\n  GROUP BY normalized_ref, currency, amount_cents\n)\nSELECT normalized_ref, currency, amount_cents, occurrence_no,\n       erp_row_id, gateway_row_id, bank_row_id,\n       CONCAT_WS(',',\n         CASE WHEN erp_row_id IS NULL THEN 'erp' END,\n         CASE WHEN gateway_row_id IS NULL THEN 'gateway' END,\n         CASE WHEN bank_row_id IS NULL THEN 'bank' END\n       ) AS missing_sources\nFROM aligned\nWHERE erp_row_id IS NULL OR gateway_row_id IS NULL OR bank_row_id IS NULL\nORDER BY normalized_ref ASC NULLS FIRST,\n         currency ASC, amount_cents ASC, occurrence_no ASC;"
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Anonymous zero-amount duplicates and a valid credit",
+        "setupSql": "DROP TABLE IF EXISTS rec05_lines;\nCREATE TABLE rec05_lines (\n  row_id BIGINT PRIMARY KEY,\n  source VARCHAR NOT NULL CHECK (source IN ('erp', 'gateway', 'bank')),\n  external_ref VARCHAR,\n  currency VARCHAR NOT NULL,\n  amount_cents BIGINT NOT NULL\n);\nINSERT INTO rec05_lines VALUES\n  (1, 'erp', NULL, 'USD', 0),\n  (2, 'erp', '  ', 'usd', 0),\n  (10, 'gateway', NULL, 'USD', 0),\n  (20, 'bank', NULL, 'USD', 0),\n  (21, 'bank', '', 'USD', 0),\n  (3, 'erp', 'X', 'USD', -100),\n  (11, 'gateway', ' x ', ' usd ', -100),\n  (22, 'bank', 'X', 'USD', -100);\n",
+        "expected": {
+          "columns": [
+            "normalized_ref",
+            "currency",
+            "amount_cents",
+            "occurrence_no",
+            "erp_row_id",
+            "gateway_row_id",
+            "bank_row_id",
+            "missing_sources"
+          ],
+          "rows": [
+            [
+              null,
+              "USD",
+              0,
+              2,
+              2,
+              null,
+              21,
+              "gateway"
+            ]
+          ]
+        },
+        "explanation": "All three sources fill anonymous occurrence 1; only ERP and bank have occurrence 2. The negative X credit fully reconciles and is omitted."
+      },
+      {
+        "label": "Currency isolation and two missing sources",
+        "setupSql": "DROP TABLE IF EXISTS rec05_lines;\nCREATE TABLE rec05_lines (\n  row_id BIGINT PRIMARY KEY,\n  source VARCHAR NOT NULL CHECK (source IN ('erp', 'gateway', 'bank')),\n  external_ref VARCHAR,\n  currency VARCHAR NOT NULL,\n  amount_cents BIGINT NOT NULL\n);\nINSERT INTO rec05_lines VALUES\n  (1, 'erp', 'Q', 'USD', 100),\n  (2, 'erp', ' Q ', 'USD', 100),\n  (10, 'gateway', 'q', 'EUR', 100),\n  (20, 'bank', 'q', 'USD', 100),\n  (21, 'bank', 'onlybank', 'CAD', 0),\n  (11, 'gateway', NULL, 'USD', -25),\n  (22, 'bank', NULL, 'USD', -25);\n",
+        "expected": {
+          "columns": [
+            "normalized_ref",
+            "currency",
+            "amount_cents",
+            "occurrence_no",
+            "erp_row_id",
+            "gateway_row_id",
+            "bank_row_id",
+            "missing_sources"
+          ],
+          "rows": [
+            [
+              null,
+              "USD",
+              -25,
+              1,
+              null,
+              11,
+              22,
+              "erp"
+            ],
+            [
+              "ONLYBANK",
+              "CAD",
+              0,
+              1,
+              null,
+              null,
+              21,
+              "erp,gateway"
+            ],
+            [
+              "Q",
+              "EUR",
+              100,
+              1,
+              null,
+              10,
+              null,
+              "erp,bank"
+            ],
+            [
+              "Q",
+              "USD",
+              100,
+              1,
+              1,
+              null,
+              20,
+              "gateway"
+            ],
+            [
+              "Q",
+              "USD",
+              100,
+              2,
+              2,
+              null,
+              null,
+              "gateway,bank"
+            ]
+          ]
+        },
+        "explanation": "The EUR Q gateway line cannot match the USD Q rows. The second USD ERP copy gets its own slot missing both other sources. Anonymous negative amounts and the bank-only zero amount remain valid rows."
+      }
+    ],
+    "rowExplanations": [
+      {
+        "key": "NULL|USD|500|2",
+        "text": "Anonymous occurrence 1 uses ERP 104, gateway 204, and bank 303. Occurrence 2 uses ERP 105 and bank 304, so gateway is missing."
+      },
+      {
+        "key": "A-1|USD|1000|2",
+        "text": "The first A-1 copy fully matches. ERP 102 and gateway 202 have no second bank copy."
+      },
+      {
+        "key": "B-2|EUR|2400|1",
+        "text": "Bank 302 is the only 2400-cent B-2 line; ERP and gateway are missing for this exact amount."
+      },
+      {
+        "key": "B-2|EUR|2500|1",
+        "text": "ERP 103 and gateway 203 agree on 2500 cents, but bank has no row for that amount."
+      },
+      {
+        "key": "D-4|USD|700|1",
+        "text": "Gateway 206 is unmatched in both ERP and bank."
+      },
+      {
+        "key": "E-5|GBP|900|1",
+        "text": "Bank 306 is unmatched in both ERP and gateway."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB window functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/window_functions"
+      }
+    ]
+  },
+  {
+    "id": "06-businessday-islands",
+    "title": "Find attendance streaks on a business calendar",
+    "difficulty": "Hard",
+    "tags": [
+      "Gaps and islands",
+      "Business calendars",
+      "Window functions",
+      "Daily deduplication"
+    ],
+    "prompt": "Find every employee's maximal attendance streak across consecutive business days in the supplied calendar. Multiple check-ins on one day count as one attended business day but all valid check-ins contribute to the streak's checkin_count. Return employee_id, start_date, end_date, business_days, checkin_count in that order. Format start_date and end_date as YYYY-MM-DD VARCHAR values. Include one-day streaks and sort by employee_id, then start_date, ascending.",
+    "businessRules": [
+      "biz06_calendar is the complete reporting calendar for its inclusive first/last dates. Use is_business_day as authoritative, including holidays and any unusual closures; do not derive eligibility from weekday names.",
+      "Two dates are consecutive business days when no calendar row with is_business_day = TRUE lies strictly between them. A holiday or weekend does not break a streak; a business day with no check-in does.",
+      "Every checked_in_at value is a timezone-naive TIMESTAMP interpreted as UTC. A check-in belongs to its UTC calendar date: midnight starts the new date and 23:59:59 belongs to the current date. Do not convert timezones.",
+      "Ignore NULL check-in timestamps, check-ins outside the reporting calendar, and check-ins on rows marked nonbusiness.",
+      "For each employee/date, count one attended business day regardless of duplicate timestamps or multiple check-ins. Each distinct checkin_id on that eligible day contributes one to checkin_count.",
+      "Output maximal streaks within the reporting calendar only; do not extend or infer attendance outside it. Employees without any eligible check-ins produce no rows. employee_id and checkin_id are non-NULL, and checkin_id is unique.",
+      "calendar_date is unique and non-NULL; is_business_day is non-NULL. Each calendar date in the reporting range appears exactly once."
+    ],
+    "tables": [
+      {
+        "name": "biz06_calendar",
+        "description": "A complete ten-date reporting calendar. July 3 is a closure in addition to the weekend.",
+        "columns": [
+          {
+            "name": "calendar_date",
+            "type": "DATE"
+          },
+          {
+            "name": "is_business_day",
+            "type": "BOOLEAN"
+          }
+        ],
+        "rows": [
+          [
+            "2026-07-02",
+            true
+          ],
+          [
+            "2026-07-03",
+            false
+          ],
+          [
+            "2026-07-04",
+            false
+          ],
+          [
+            "2026-07-05",
+            false
+          ],
+          [
+            "2026-07-06",
+            true
+          ],
+          [
+            "2026-07-07",
+            true
+          ],
+          [
+            "2026-07-08",
+            true
+          ],
+          [
+            "2026-07-09",
+            true
+          ],
+          [
+            "2026-07-10",
+            true
+          ],
+          [
+            "2026-07-11",
+            false
+          ]
+        ]
+      },
+      {
+        "name": "biz06_checkins",
+        "description": "Raw UTC check-ins, including same-day duplicates, a closure-day event, and a NULL timestamp.",
+        "columns": [
+          {
+            "name": "checkin_id",
+            "type": "BIGINT"
+          },
+          {
+            "name": "employee_id",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "checked_in_at",
+            "type": "TIMESTAMP"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            "E1",
+            "2026-07-02 09:00:00"
+          ],
+          [
+            2,
+            "E1",
+            "2026-07-06 09:00:00"
+          ],
+          [
+            3,
+            "E1",
+            "2026-07-06 17:00:00"
+          ],
+          [
+            4,
+            "E1",
+            "2026-07-08 10:00:00"
+          ],
+          [
+            5,
+            "E1",
+            "2026-07-09 10:00:00"
+          ],
+          [
+            6,
+            "E1",
+            "2026-07-03 10:00:00"
+          ],
+          [
+            7,
+            "E2",
+            "2026-07-02 08:00:00"
+          ],
+          [
+            8,
+            "E2",
+            "2026-07-07 08:00:00"
+          ],
+          [
+            9,
+            "E2",
+            "2026-07-08 08:00:00"
+          ],
+          [
+            10,
+            "E2",
+            null
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS biz06_checkins;\nDROP TABLE IF EXISTS biz06_calendar;\nCREATE TABLE biz06_calendar (\n  calendar_date DATE PRIMARY KEY,\n  is_business_day BOOLEAN NOT NULL\n);\nCREATE TABLE biz06_checkins (\n  checkin_id BIGINT PRIMARY KEY,\n  employee_id VARCHAR NOT NULL,\n  checked_in_at TIMESTAMP\n);\nINSERT INTO biz06_calendar VALUES\n  ('2026-07-02', TRUE),\n  ('2026-07-03', FALSE),\n  ('2026-07-04', FALSE),\n  ('2026-07-05', FALSE),\n  ('2026-07-06', TRUE),\n  ('2026-07-07', TRUE),\n  ('2026-07-08', TRUE),\n  ('2026-07-09', TRUE),\n  ('2026-07-10', TRUE),\n  ('2026-07-11', FALSE);\nINSERT INTO biz06_checkins VALUES\n  (1, 'E1', '2026-07-02 09:00:00'),\n  (2, 'E1', '2026-07-06 09:00:00'),\n  (3, 'E1', '2026-07-06 17:00:00'),\n  (4, 'E1', '2026-07-08 10:00:00'),\n  (5, 'E1', '2026-07-09 10:00:00'),\n  (6, 'E1', '2026-07-03 10:00:00'),\n  (7, 'E2', '2026-07-02 08:00:00'),\n  (8, 'E2', '2026-07-07 08:00:00'),\n  (9, 'E2', '2026-07-08 08:00:00'),\n  (10, 'E2', NULL);\n",
+    "starterSql": "-- Number eligible calendar dates, collapse employee/day events, and find islands.\nSELECT employee_id,\n       CAST(NULL AS VARCHAR) AS start_date,\n       CAST(NULL AS VARCHAR) AS end_date,\n       CAST(NULL AS BIGINT) AS business_days,\n       CAST(NULL AS BIGINT) AS checkin_count\nFROM biz06_checkins\nWHERE FALSE\nORDER BY employee_id, start_date;",
+    "solutionSql": "WITH business_calendar AS (\n  SELECT calendar_date,\n         ROW_NUMBER() OVER (ORDER BY calendar_date) AS business_day_no\n  FROM biz06_calendar\n  WHERE is_business_day\n), daily_checkins AS (\n  SELECT e.employee_id, c.calendar_date, c.business_day_no,\n         COUNT(*) AS daily_checkin_count\n  FROM biz06_checkins AS e\n  JOIN business_calendar AS c\n    ON CAST(e.checked_in_at AS DATE) = c.calendar_date\n  GROUP BY e.employee_id, c.calendar_date, c.business_day_no\n), labeled AS (\n  SELECT *,\n         business_day_no - ROW_NUMBER() OVER (\n           PARTITION BY employee_id ORDER BY calendar_date\n         ) AS island_key\n  FROM daily_checkins\n)\nSELECT employee_id,\n       CAST(MIN(calendar_date) AS VARCHAR) AS start_date,\n       CAST(MAX(calendar_date) AS VARCHAR) AS end_date,\n       COUNT(*) AS business_days,\n       SUM(daily_checkin_count) AS checkin_count\nFROM labeled\nGROUP BY employee_id, island_key\nORDER BY employee_id, MIN(calendar_date);",
+    "expected": {
+      "columns": [
+        "employee_id",
+        "start_date",
+        "end_date",
+        "business_days",
+        "checkin_count"
+      ],
+      "rows": [
+        [
+          "E1",
+          "2026-07-02",
+          "2026-07-06",
+          2,
+          3
+        ],
+        [
+          "E1",
+          "2026-07-08",
+          "2026-07-09",
+          2,
+          2
+        ],
+        [
+          "E2",
+          "2026-07-02",
+          "2026-07-02",
+          1,
+          1
+        ],
+        [
+          "E2",
+          "2026-07-07",
+          "2026-07-08",
+          2,
+          2
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Number only business-day calendar rows so that a holiday/weekend gap consumes no business-day positions.",
+      "Join UTC event dates to that filtered calendar. This simultaneously excludes NULL, out-of-range, and nonbusiness events.",
+      "Collapse each employee/date to a daily count before computing employee attendance positions. For consecutive attendance, business_day_no and the employee's ROW_NUMBER advance together, so their difference stays constant.",
+      "A missed business day increases the calendar number without advancing the attendance number; the difference changes and begins a new island.",
+      "Aggregate each employee/island to minimum and maximum date, a count of attended dates, and the sum of raw eligible check-in counts."
+    ],
+    "hints": [
+      "Calendar-day subtraction will split a Thursday-to-Monday streak even when Friday is a holiday. What sequence should define adjacency?",
+      "Assign an increasing position to business dates only, then reduce check-ins to one row per employee/business date while retaining a daily event count.",
+      "For each employee, subtract ROW_NUMBER ordered by attended date from the calendar's business-day position. Group equal differences to obtain maximal streaks."
+    ],
+    "pitfalls": [
+      "Using date minus row number measures consecutive calendar days rather than business days.",
+      "Computing ROW_NUMBER on raw check-ins allows duplicates to distort the island labels.",
+      "Filtering only Saturdays and Sundays overlooks calendar-specific closures.",
+      "Counting raw check-ins as business_days inflates attendance length.",
+      "Joining all calendar dates before checking is_business_day incorrectly includes closure-day events."
+    ],
+    "wrongQueries": [
+      {
+        "label": "Use calendar-day distance instead of business-day positions",
+        "sql": "WITH business_calendar AS (\n  SELECT calendar_date,\n         ROW_NUMBER() OVER (ORDER BY calendar_date) AS business_day_no\n  FROM biz06_calendar\n  WHERE is_business_day\n), daily_checkins AS (\n  SELECT e.employee_id, c.calendar_date, c.business_day_no,\n         COUNT(*) AS daily_checkin_count\n  FROM biz06_checkins AS e\n  JOIN business_calendar AS c\n    ON CAST(e.checked_in_at AS DATE) = c.calendar_date\n  GROUP BY e.employee_id, c.calendar_date, c.business_day_no\n), labeled AS (\n  SELECT *,\n         calendar_date - CAST(ROW_NUMBER() OVER (\n           PARTITION BY employee_id ORDER BY calendar_date\n         ) AS INTEGER) AS island_key\n  FROM daily_checkins\n)\nSELECT employee_id,\n       CAST(MIN(calendar_date) AS VARCHAR) AS start_date,\n       CAST(MAX(calendar_date) AS VARCHAR) AS end_date,\n       COUNT(*) AS business_days,\n       SUM(daily_checkin_count) AS checkin_count\nFROM labeled\nGROUP BY employee_id, island_key\nORDER BY employee_id, MIN(calendar_date);"
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Bridge a holiday/weekend and respect UTC/report boundaries",
+        "setupSql": "DROP TABLE IF EXISTS biz06_checkins;\nDROP TABLE IF EXISTS biz06_calendar;\nCREATE TABLE biz06_calendar (\n  calendar_date DATE PRIMARY KEY,\n  is_business_day BOOLEAN NOT NULL\n);\nCREATE TABLE biz06_checkins (\n  checkin_id BIGINT PRIMARY KEY,\n  employee_id VARCHAR NOT NULL,\n  checked_in_at TIMESTAMP\n);\nINSERT INTO biz06_calendar VALUES\n  ('2026-07-01', TRUE),\n  ('2026-07-02', TRUE),\n  ('2026-07-03', FALSE),\n  ('2026-07-04', FALSE),\n  ('2026-07-05', FALSE),\n  ('2026-07-06', TRUE),\n  ('2026-07-07', TRUE),\n  ('2026-07-08', TRUE);\nINSERT INTO biz06_checkins VALUES\n  (1, 'BRIDGE', '2026-07-01 00:00:00'),\n  (2, 'BRIDGE', '2026-07-02 23:59:59'),\n  (3, 'BRIDGE', '2026-07-06 00:00:00'),\n  (4, 'BRIDGE', '2026-07-07 12:00:00'),\n  (5, 'BRIDGE', '2026-07-08 23:59:59'),\n  (6, 'BRIDGE', '2026-07-03 12:00:00'),\n  (7, 'BRIDGE', '2026-07-04 12:00:00'),\n  (8, 'BRIDGE', '2026-07-09 00:00:00'),\n  (9, 'BRIDGE', NULL);\n",
+        "expected": {
+          "columns": [
+            "employee_id",
+            "start_date",
+            "end_date",
+            "business_days",
+            "checkin_count"
+          ],
+          "rows": [
+            [
+              "BRIDGE",
+              "2026-07-01",
+              "2026-07-08",
+              5,
+              5
+            ]
+          ]
+        },
+        "explanation": "All five eligible calendar dates are attended, so the closure on July 3 and weekend create no gap. Midnight/end-of-day events belong to their UTC dates. Holiday, weekend, out-of-range, and NULL events add nothing."
+      },
+      {
+        "label": "Missing business days with exact duplicate timestamps",
+        "setupSql": "DROP TABLE IF EXISTS biz06_checkins;\nDROP TABLE IF EXISTS biz06_calendar;\nCREATE TABLE biz06_calendar (\n  calendar_date DATE PRIMARY KEY,\n  is_business_day BOOLEAN NOT NULL\n);\nCREATE TABLE biz06_checkins (\n  checkin_id BIGINT PRIMARY KEY,\n  employee_id VARCHAR NOT NULL,\n  checked_in_at TIMESTAMP\n);\nINSERT INTO biz06_calendar VALUES\n  ('2026-09-07', TRUE),\n  ('2026-09-08', TRUE),\n  ('2026-09-09', TRUE),\n  ('2026-09-10', TRUE),\n  ('2026-09-11', TRUE);\nINSERT INTO biz06_checkins VALUES\n  (1, 'X', '2026-09-07 08:00:00'),\n  (2, 'X', '2026-09-07 08:00:00'),\n  (3, 'X', '2026-09-09 09:00:00'),\n  (4, 'X', '2026-09-10 09:00:00'),\n  (5, 'X', '2026-09-12 09:00:00'),\n  (6, 'X', NULL),\n  (7, 'Y', '2026-09-08 08:00:00'),\n  (8, 'Y', '2026-09-08 17:00:00'),\n  (9, 'Y', '2026-09-11 08:00:00'),\n  (10, 'Y', '2026-09-06 08:00:00');\n",
+        "expected": {
+          "columns": [
+            "employee_id",
+            "start_date",
+            "end_date",
+            "business_days",
+            "checkin_count"
+          ],
+          "rows": [
+            [
+              "X",
+              "2026-09-07",
+              "2026-09-07",
+              1,
+              2
+            ],
+            [
+              "X",
+              "2026-09-09",
+              "2026-09-10",
+              2,
+              2
+            ],
+            [
+              "Y",
+              "2026-09-08",
+              "2026-09-08",
+              1,
+              2
+            ],
+            [
+              "Y",
+              "2026-09-11",
+              "2026-09-11",
+              1,
+              1
+            ]
+          ]
+        },
+        "explanation": "Two X check-in IDs at the exact same timestamp count as two check-ins on one attended day. Missing September 8 splits X; missing September 9 and 10 splits Y. Outside-calendar and NULL events are ignored."
+      }
+    ],
+    "rowExplanations": [
+      {
+        "key": "E1|2026-07-02",
+        "text": "July 2 and July 6 are adjacent business dates because July 3-5 are closed. Two July 6 check-ins yield two attended business days and three check-ins."
+      },
+      {
+        "key": "E1|2026-07-08",
+        "text": "Missing July 7 breaks E1's first streak; July 8 and 9 form the next two-day streak."
+      },
+      {
+        "key": "E2|2026-07-02",
+        "text": "E2 misses the next business date, July 6, so July 2 is a one-day island."
+      },
+      {
+        "key": "E2|2026-07-07",
+        "text": "July 7 and 8 are adjacent attended business dates; the NULL event does not count."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB window functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/window_functions"
+      }
+    ]
+  },
+  {
+    "id": "07-attribution",
+    "title": "Attribution without stealing the conversion",
+    "difficulty": "Hard",
+    "tags": [
+      "Window functions",
+      "Temporal joins",
+      "Tie-breaking"
+    ],
+    "prompt": "A growth team uses a seven-day last-non-direct attribution model. Attribute every conversion to exactly one eligible touch, while retaining conversions with no match. Return conversion_id, attributed_channel, touch_id, hours_since_touch, ordered by conversion_id. Round elapsed hours to two decimal places.",
+    "businessRules": [
+      "All timestamps are UTC. The eligibility window is [converted_at minus 7 days, converted_at], including both endpoints.",
+      "A touch matches only the same non-NULL user_id. Anonymous conversions must remain unattributed, even if anonymous touches exist.",
+      "If any eligible non-direct touch exists, select the latest non-direct touch. Otherwise choose the latest eligible direct touch.",
+      "Break equal touched_at timestamps by higher touch_id. A touch can be credited to multiple conversions; it is not consumed.",
+      "For no eligible touch, use attributed_channel = 'unattributed' and NULL for touch_id and hours_since_touch. Channel values are never NULL."
+    ],
+    "tables": [
+      {
+        "name": "a07_conversions",
+        "description": "One row per conversion; anonymous user IDs are NULL.",
+        "columns": [
+          {
+            "name": "conversion_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "user_id",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "converted_at",
+            "type": "TIMESTAMP"
+          }
+        ],
+        "rows": [
+          [
+            101,
+            "u1",
+            "2026-01-10 12:00:00"
+          ],
+          [
+            102,
+            "u2",
+            "2026-01-10 12:00:00"
+          ],
+          [
+            103,
+            "u3",
+            "2026-01-10 12:00:00"
+          ],
+          [
+            104,
+            null,
+            "2026-01-10 12:00:00"
+          ],
+          [
+            105,
+            "u1",
+            "2026-01-10 11:30:00"
+          ],
+          [
+            106,
+            "u4",
+            "2026-01-10 12:00:00"
+          ]
+        ]
+      },
+      {
+        "name": "a07_touches",
+        "description": "One row per touch. touch_id is unique and is the deterministic tie-breaker.",
+        "columns": [
+          {
+            "name": "touch_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "user_id",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "touched_at",
+            "type": "TIMESTAMP"
+          },
+          {
+            "name": "channel",
+            "type": "VARCHAR"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            "u1",
+            "2026-01-03 12:00:00",
+            "paid-search"
+          ],
+          [
+            2,
+            "u1",
+            "2026-01-08 12:00:00",
+            "email"
+          ],
+          [
+            3,
+            "u1",
+            "2026-01-10 11:00:00",
+            "direct"
+          ],
+          [
+            4,
+            "u1",
+            "2026-01-08 12:00:00",
+            "paid-social"
+          ],
+          [
+            5,
+            "u2",
+            "2026-01-10 10:00:00",
+            "direct"
+          ],
+          [
+            6,
+            "u2",
+            "2026-01-10 10:00:00",
+            "direct"
+          ],
+          [
+            7,
+            "u3",
+            "2026-01-03 11:59:00",
+            "email"
+          ],
+          [
+            8,
+            "u3",
+            "2026-01-10 12:01:00",
+            "paid-search"
+          ],
+          [
+            9,
+            null,
+            "2026-01-10 11:00:00",
+            "email"
+          ],
+          [
+            10,
+            "u4",
+            "2026-01-03 12:00:00",
+            "paid-search"
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS a07_conversions;\nCREATE TABLE a07_conversions (conversion_id INTEGER, user_id VARCHAR, converted_at TIMESTAMP);\nINSERT INTO a07_conversions VALUES\n(101, 'u1', '2026-01-10 12:00:00'),\n(102, 'u2', '2026-01-10 12:00:00'),\n(103, 'u3', '2026-01-10 12:00:00'),\n(104, NULL, '2026-01-10 12:00:00'),\n(105, 'u1', '2026-01-10 11:30:00'),\n(106, 'u4', '2026-01-10 12:00:00');\nDROP TABLE IF EXISTS a07_touches;\nCREATE TABLE a07_touches (touch_id INTEGER, user_id VARCHAR, touched_at TIMESTAMP, channel VARCHAR);\nINSERT INTO a07_touches VALUES\n(1, 'u1', '2026-01-03 12:00:00', 'paid-search'),\n(2, 'u1', '2026-01-08 12:00:00', 'email'),\n(3, 'u1', '2026-01-10 11:00:00', 'direct'),\n(4, 'u1', '2026-01-08 12:00:00', 'paid-social'),\n(5, 'u2', '2026-01-10 10:00:00', 'direct'),\n(6, 'u2', '2026-01-10 10:00:00', 'direct'),\n(7, 'u3', '2026-01-03 11:59:00', 'email'),\n(8, 'u3', '2026-01-10 12:01:00', 'paid-search'),\n(9, NULL, '2026-01-10 11:00:00', 'email'),\n(10, 'u4', '2026-01-03 12:00:00', 'paid-search');",
+    "starterSql": "-- Rank eligible touches separately for each conversion.\nSELECT * FROM a07_conversions ORDER BY conversion_id;",
+    "solutionSql": "WITH eligible AS (\n  SELECT c.conversion_id, c.converted_at,\n         t.touch_id, t.touched_at, t.channel,\n         ROW_NUMBER() OVER (\n           PARTITION BY c.conversion_id\n           ORDER BY CASE WHEN t.channel <> 'direct' THEN 0 ELSE 1 END,\n                    t.touched_at DESC, t.touch_id DESC\n         ) AS choice\n  FROM a07_conversions c\n  LEFT JOIN a07_touches t\n    ON c.user_id = t.user_id\n   AND t.touched_at >= c.converted_at - INTERVAL '7 days'\n   AND t.touched_at <= c.converted_at\n)\nSELECT conversion_id,\n       COALESCE(channel, 'unattributed') AS attributed_channel,\n       touch_id,\n       CAST(ROUND(DATE_DIFF('second', touched_at, converted_at) / 3600.0, 2)\n            AS DECIMAL(12,2)) AS hours_since_touch\nFROM eligible\nWHERE choice = 1\nORDER BY conversion_id;",
+    "expected": {
+      "columns": [
+        "conversion_id",
+        "attributed_channel",
+        "touch_id",
+        "hours_since_touch"
+      ],
+      "rows": [
+        [
+          101,
+          "paid-social",
+          4,
+          48
+        ],
+        [
+          102,
+          "direct",
+          6,
+          2
+        ],
+        [
+          103,
+          "unattributed",
+          null,
+          null
+        ],
+        [
+          104,
+          "unattributed",
+          null,
+          null
+        ],
+        [
+          105,
+          "paid-social",
+          4,
+          47.5
+        ],
+        [
+          106,
+          "paid-search",
+          10,
+          168
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Build eligible touch candidates with time conditions inside the LEFT JOIN so a conversion with no candidates still survives.",
+      "Rank non-direct candidates before direct ones, then newest timestamp and highest touch ID. Partition by conversion_id, not user_id, because users can convert more than once.",
+      "Keeping choice = 1 yields exactly one row per conversion. Elapsed seconds divided by 3600 gives duration, rather than counting crossed clock-hour boundaries."
+    ],
+    "hints": [
+      "Start with a LEFT JOIN from conversions. Put the eligibility window in ON, not WHERE.",
+      "The ordering must first prefer non-direct channels, then recency, then touch_id. Partition the ranking by conversion_id.",
+      "Use ROW_NUMBER(), keep rank 1, and compute DATE_DIFF('second', touched_at, converted_at) / 3600.0."
+    ],
+    "pitfalls": [
+      "Taking the most recent touch blindly credits direct traffic for conversions 101 and 105.",
+      "Partitioning by user_id collapses multiple conversions into one row.",
+      "Using a null-safe user join incorrectly links anonymous people.",
+      "Moving touch filters into WHERE turns the LEFT JOIN into an effective inner join."
+    ],
+    "rowExplanations": [
+      {
+        "key": "101",
+        "text": "Touch 4 beats touch 2 on ID at the same timestamp and beats newer direct touch 3 on channel priority; it is 48 hours earlier."
+      },
+      {
+        "key": "102",
+        "text": "Both eligible touches are direct at the same timestamp; ID 6 wins, two hours before conversion."
+      },
+      {
+        "key": "103",
+        "text": "Touch 7 is one minute too old and touch 8 is one minute in the future."
+      },
+      {
+        "key": "104",
+        "text": "NULL user IDs do not identify the same person, so anonymous touch 9 cannot match."
+      },
+      {
+        "key": "105",
+        "text": "Touch 4 can also be credited to this earlier conversion, with 47.5 elapsed hours."
+      },
+      {
+        "key": "106",
+        "text": "Touch 10 lies exactly on the inclusive seven-day boundary: 168 hours."
+      }
+    ],
+    "wrongQueries": [
+      {
+        "label": "Blind last-touch attribution ignores non-direct priority",
+        "sql": "WITH eligible AS (\n  SELECT c.conversion_id, c.converted_at,\n         t.touch_id, t.touched_at, t.channel,\n         ROW_NUMBER() OVER (\n           PARTITION BY c.conversion_id\n           ORDER BY t.touched_at DESC, t.touch_id DESC\n         ) AS choice\n  FROM a07_conversions c\n  LEFT JOIN a07_touches t\n    ON c.user_id = t.user_id\n   AND t.touched_at >= c.converted_at - INTERVAL '7 days'\n   AND t.touched_at <= c.converted_at\n)\nSELECT conversion_id,\n       COALESCE(channel, 'unattributed') AS attributed_channel,\n       touch_id,\n       CAST(ROUND(DATE_DIFF('second', touched_at, converted_at) / 3600.0, 2)\n            AS DECIMAL(12,2)) AS hours_since_touch\nFROM eligible\nWHERE choice = 1\nORDER BY conversion_id;"
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Boundary and channel priority",
+        "setupSql": "DROP TABLE IF EXISTS a07_conversions;\nCREATE TABLE a07_conversions (conversion_id INTEGER, user_id VARCHAR, converted_at TIMESTAMP);\nINSERT INTO a07_conversions VALUES\n(901, 'x', '2026-02-10 12:00:00'),\n(902, 'y', '2026-02-10 12:00:00');\nDROP TABLE IF EXISTS a07_touches;\nCREATE TABLE a07_touches (touch_id INTEGER, user_id VARCHAR, touched_at TIMESTAMP, channel VARCHAR);\nINSERT INTO a07_touches VALUES\n(91, 'x', '2026-02-03 12:00:00', 'email'),\n(92, 'x', '2026-02-10 12:00:00', 'direct'),\n(93, 'y', '2026-02-10 12:00:00', 'direct');",
+        "expected": {
+          "columns": [
+            "conversion_id",
+            "attributed_channel",
+            "touch_id",
+            "hours_since_touch"
+          ],
+          "rows": [
+            [
+              901,
+              "email",
+              91,
+              168
+            ],
+            [
+              902,
+              "direct",
+              93,
+              0
+            ]
+          ]
+        },
+        "explanation": "An exact seven-day non-direct touch outranks a direct touch at conversion time. A direct-only conversion gets zero elapsed hours."
+      },
+      {
+        "label": "Null identity and fractional durations",
+        "setupSql": "DROP TABLE IF EXISTS a07_conversions;\nCREATE TABLE a07_conversions (conversion_id INTEGER, user_id VARCHAR, converted_at TIMESTAMP);\nINSERT INTO a07_conversions VALUES\n(801, NULL, '2026-03-01 12:00:00'),\n(802, 'z', '2026-03-01 12:00:00'),\n(803, 'z', '2026-03-01 12:30:00');\nDROP TABLE IF EXISTS a07_touches;\nCREATE TABLE a07_touches (touch_id INTEGER, user_id VARCHAR, touched_at TIMESTAMP, channel VARCHAR);\nINSERT INTO a07_touches VALUES\n(81, NULL, '2026-03-01 11:00:00', 'email'),\n(82, 'z', '2026-03-01 11:15:00', 'email'),\n(83, 'z', '2026-03-01 11:15:00', 'paid-search'),\n(84, 'z', '2026-03-01 13:00:00', 'paid-social');",
+        "expected": {
+          "columns": [
+            "conversion_id",
+            "attributed_channel",
+            "touch_id",
+            "hours_since_touch"
+          ],
+          "rows": [
+            [
+              801,
+              "unattributed",
+              null,
+              null
+            ],
+            [
+              802,
+              "paid-search",
+              83,
+              0.75
+            ],
+            [
+              803,
+              "paid-search",
+              83,
+              1.25
+            ]
+          ]
+        },
+        "explanation": "NULL identities never match; equal-time IDs resolve deterministically; future touches cannot win; one touch may serve multiple conversions."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB window functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/window_functions"
+      }
+    ]
+  },
+  {
+    "id": "08-incremental-cdc",
+    "title": "Replay-safe CDC with tombstones",
+    "difficulty": "Expert",
+    "tags": [
+      "CDC",
+      "Deduplication",
+      "Incremental models"
+    ],
+    "prompt": "Build the next account snapshot from a stored snapshot and a replay-prone CDC batch, as of the ingestion cutoff 2026-01-11 00:00:00 UTC. Return account_id, last_seq, is_deleted, email, plan ordered by account_id. Keep tombstones in the result so later replays cannot resurrect deleted accounts.",
+    "businessRules": [
+      "The existing snapshot has at most one row per account, including deleted accounts. account_id, source_seq and ingest_id are non-NULL; sequence numbers increase within an account.",
+      "Only delta rows ingested strictly before 2026-01-11 00:00:00 UTC are visible. Source sequence determines business order; arrival time does not.",
+      "For accounts already in the snapshot, ignore every delta with source_seq <= last_seq. Existing state wins ties with its watermark.",
+      "Among eligible deltas, greatest source_seq wins; for conflicting rows at the same source_seq, greatest ingest_id wins. Repeated identical rows sharing ingest_id are transport duplicates and are harmless.",
+      "operation is U (full replacement) or D (deletion). NULL in a U payload is a genuine replacement value, not 'keep the old value'.",
+      "A winning D row is retained with is_deleted = true and NULL email/plan, even if its payload is populated. A later-sequence U can recreate the account. Unchanged snapshot rows remain.",
+      "ingest_id is a nonnegative integer. Rows sharing ingest_id are identical transport copies; distinct conflicting records have different ingest IDs. The stored snapshot represents valid normalized state, with NULL payloads on tombstones."
+    ],
+    "tables": [
+      {
+        "name": "c08_snapshot",
+        "description": "Previously materialized state, including tombstones and their sequence watermark.",
+        "columns": [
+          {
+            "name": "account_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "last_seq",
+            "type": "INTEGER"
+          },
+          {
+            "name": "is_deleted",
+            "type": "BOOLEAN"
+          },
+          {
+            "name": "email",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "plan",
+            "type": "VARCHAR"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            10,
+            false,
+            "old-a@example.test",
+            "free"
+          ],
+          [
+            2,
+            20,
+            false,
+            "old-b@example.test",
+            "pro"
+          ],
+          [
+            3,
+            30,
+            false,
+            "old-c@example.test",
+            "free"
+          ],
+          [
+            4,
+            40,
+            true,
+            null,
+            null
+          ],
+          [
+            6,
+            6,
+            false,
+            "keep@example.test",
+            "free"
+          ]
+        ]
+      },
+      {
+        "name": "c08_delta",
+        "description": "Full replacement records. Exact transport duplicates can repeat an ingest_id.",
+        "columns": [
+          {
+            "name": "ingest_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "account_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "source_seq",
+            "type": "INTEGER"
+          },
+          {
+            "name": "ingested_at",
+            "type": "TIMESTAMP"
+          },
+          {
+            "name": "operation",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "email",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "plan",
+            "type": "VARCHAR"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            1,
+            9,
+            "2026-01-10 08:00:00",
+            "U",
+            "stale@example.test",
+            "free"
+          ],
+          [
+            2,
+            1,
+            11,
+            "2026-01-10 08:05:00",
+            "U",
+            "new-a@example.test",
+            "pro"
+          ],
+          [
+            3,
+            1,
+            11,
+            "2026-01-10 08:06:00",
+            "U",
+            null,
+            "enterprise"
+          ],
+          [
+            4,
+            2,
+            21,
+            "2026-01-10 09:00:00",
+            "D",
+            null,
+            null
+          ],
+          [
+            5,
+            2,
+            22,
+            "2026-01-10 10:00:00",
+            "U",
+            "reborn@example.test",
+            "free"
+          ],
+          [
+            6,
+            3,
+            31,
+            "2026-01-10 10:00:00",
+            "D",
+            "ignored@example.test",
+            "pro"
+          ],
+          [
+            7,
+            4,
+            39,
+            "2026-01-10 10:00:00",
+            "U",
+            "zombie@example.test",
+            "pro"
+          ],
+          [
+            8,
+            5,
+            1,
+            "2026-01-10 10:00:00",
+            "U",
+            "new@example.test",
+            "free"
+          ],
+          [
+            9,
+            5,
+            2,
+            "2026-01-10 11:00:00",
+            "D",
+            null,
+            null
+          ],
+          [
+            10,
+            7,
+            1,
+            "2026-01-11 00:00:00",
+            "U",
+            "future@example.test",
+            "free"
+          ],
+          [
+            11,
+            1,
+            10,
+            "2026-01-10 11:00:00",
+            "D",
+            null,
+            null
+          ],
+          [
+            12,
+            6,
+            7,
+            "2026-01-11 00:00:01",
+            "D",
+            null,
+            null
+          ],
+          [
+            5,
+            2,
+            22,
+            "2026-01-10 10:00:00",
+            "U",
+            "reborn@example.test",
+            "free"
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS c08_snapshot;\nCREATE TABLE c08_snapshot (account_id INTEGER, last_seq INTEGER, is_deleted BOOLEAN, email VARCHAR, plan VARCHAR);\nINSERT INTO c08_snapshot VALUES\n(1, 10, FALSE, 'old-a@example.test', 'free'),\n(2, 20, FALSE, 'old-b@example.test', 'pro'),\n(3, 30, FALSE, 'old-c@example.test', 'free'),\n(4, 40, TRUE, NULL, NULL),\n(6, 6, FALSE, 'keep@example.test', 'free');\nDROP TABLE IF EXISTS c08_delta;\nCREATE TABLE c08_delta (ingest_id INTEGER, account_id INTEGER, source_seq INTEGER, ingested_at TIMESTAMP, operation VARCHAR, email VARCHAR, plan VARCHAR);\nINSERT INTO c08_delta VALUES\n(1, 1, 9, '2026-01-10 08:00:00', 'U', 'stale@example.test', 'free'),\n(2, 1, 11, '2026-01-10 08:05:00', 'U', 'new-a@example.test', 'pro'),\n(3, 1, 11, '2026-01-10 08:06:00', 'U', NULL, 'enterprise'),\n(4, 2, 21, '2026-01-10 09:00:00', 'D', NULL, NULL),\n(5, 2, 22, '2026-01-10 10:00:00', 'U', 'reborn@example.test', 'free'),\n(6, 3, 31, '2026-01-10 10:00:00', 'D', 'ignored@example.test', 'pro'),\n(7, 4, 39, '2026-01-10 10:00:00', 'U', 'zombie@example.test', 'pro'),\n(8, 5, 1, '2026-01-10 10:00:00', 'U', 'new@example.test', 'free'),\n(9, 5, 2, '2026-01-10 11:00:00', 'D', NULL, NULL),\n(10, 7, 1, '2026-01-11 00:00:00', 'U', 'future@example.test', 'free'),\n(11, 1, 10, '2026-01-10 11:00:00', 'D', NULL, NULL),\n(12, 6, 7, '2026-01-11 00:00:01', 'D', NULL, NULL),\n(5, 2, 22, '2026-01-10 10:00:00', 'U', 'reborn@example.test', 'free');",
+    "starterSql": "-- Compare each source sequence with the stored watermark before ranking.\nSELECT * FROM c08_delta ORDER BY account_id, source_seq, ingest_id;",
+    "solutionSql": "WITH eligible_delta AS (\n  SELECT d.*\n  FROM c08_delta d\n  LEFT JOIN c08_snapshot s ON d.account_id = s.account_id\n  WHERE d.ingested_at < TIMESTAMP '2026-01-11 00:00:00'\n    AND (s.account_id IS NULL OR d.source_seq > s.last_seq)\n), candidates AS (\n  SELECT account_id, last_seq, is_deleted, email, plan, -1 AS ingest_id\n  FROM c08_snapshot\n  UNION ALL\n  SELECT account_id, source_seq AS last_seq, operation = 'D' AS is_deleted,\n         email, plan, ingest_id\n  FROM eligible_delta\n), ranked AS (\n  SELECT *, ROW_NUMBER() OVER (\n    PARTITION BY account_id ORDER BY last_seq DESC, ingest_id DESC\n  ) AS choice\n  FROM candidates\n)\nSELECT account_id, last_seq, is_deleted,\n       CASE WHEN is_deleted THEN NULL ELSE email END AS email,\n       CASE WHEN is_deleted THEN NULL ELSE plan END AS plan\nFROM ranked\nWHERE choice = 1\nORDER BY account_id;",
+    "expected": {
+      "columns": [
+        "account_id",
+        "last_seq",
+        "is_deleted",
+        "email",
+        "plan"
+      ],
+      "rows": [
+        [
+          1,
+          11,
+          false,
+          null,
+          "enterprise"
+        ],
+        [
+          2,
+          22,
+          false,
+          "reborn@example.test",
+          "free"
+        ],
+        [
+          3,
+          31,
+          true,
+          null,
+          null
+        ],
+        [
+          4,
+          40,
+          true,
+          null,
+          null
+        ],
+        [
+          5,
+          2,
+          true,
+          null,
+          null
+        ],
+        [
+          6,
+          6,
+          false,
+          "keep@example.test",
+          "free"
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Filter on ingestion time to construct the requested as-of batch, then reject source sequences that the snapshot has already processed. This is what makes retries safe.",
+      "Union surviving changes with stored rows and rank once per account by source sequence, then ingest ID. Rank U and D together; deleting tombstones early would let old upserts win.",
+      "Preserve the winning sequence even on a deletion. Clear deletion payload fields after ranking, but do not coalesce NULL fields for a winning upsert."
+    ],
+    "hints": [
+      "The newest arrival is not necessarily the newest business event. Filter deltas against both the cutoff and each account's stored sequence.",
+      "Treat a deletion as a candidate state and rank it alongside upserts. Union snapshot rows with eligible candidates.",
+      "ROW_NUMBER() by account_id with last_seq DESC, ingest_id DESC identifies the winner; null the payload only when that winning row is deleted."
+    ],
+    "pitfalls": [
+      "Dropping D records before ranking resurrects account 3 and account 5.",
+      "Joining only non-deleted snapshot rows loses account 4's watermark.",
+      "COALESCE(new.email, old.email) violates full-replacement semantics for account 1.",
+      "Ordering by ingestion time can let a late stale event undo newer state.",
+      "Using <= at the ingestion cutoff includes account 7 too early."
+    ],
+    "rowExplanations": [
+      {
+        "key": "1",
+        "text": "Source sequence 11 beats 9 and 10. At sequence 11, ingest ID 3 wins and intentionally replaces the email with NULL."
+      },
+      {
+        "key": "2",
+        "text": "Sequence 22 recreates the account after deletion 21. Its identical transport duplicate does not create an extra output row."
+      },
+      {
+        "key": "3",
+        "text": "Deletion 31 wins and remains as a tombstone; its junk payload is cleared."
+      },
+      {
+        "key": "4",
+        "text": "The stored deletion watermark is 40. Stale update 39 cannot resurrect it."
+      },
+      {
+        "key": "5",
+        "text": "A newly seen account is created at sequence 1 then deleted at 2; preserve the tombstone."
+      },
+      {
+        "key": "6",
+        "text": "The only delta arrives after the cutoff, so the existing state stays intact."
+      }
+    ],
+    "wrongQueries": [
+      {
+        "label": "Filter deletions before choosing the latest state",
+        "sql": "WITH eligible_delta AS (\n  SELECT d.*\n  FROM c08_delta d\n  LEFT JOIN c08_snapshot s ON d.account_id = s.account_id\n  WHERE d.ingested_at < TIMESTAMP '2026-01-11 00:00:00'\n    AND (s.account_id IS NULL OR d.source_seq > s.last_seq)\n), candidates AS (\n  SELECT account_id, last_seq, is_deleted, email, plan, -1 AS ingest_id\n  FROM c08_snapshot\n  UNION ALL\n  SELECT account_id, source_seq AS last_seq, operation = 'D' AS is_deleted,\n         email, plan, ingest_id\n  FROM eligible_delta WHERE operation <> 'D'\n), ranked AS (\n  SELECT *, ROW_NUMBER() OVER (\n    PARTITION BY account_id ORDER BY last_seq DESC, ingest_id DESC\n  ) AS choice\n  FROM candidates\n)\nSELECT account_id, last_seq, is_deleted,\n       CASE WHEN is_deleted THEN NULL ELSE email END AS email,\n       CASE WHEN is_deleted THEN NULL ELSE plan END AS plan\nFROM ranked\nWHERE choice = 1\nORDER BY account_id;"
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Watermarks and replacement NULLs",
+        "setupSql": "DROP TABLE IF EXISTS c08_snapshot;\nCREATE TABLE c08_snapshot (account_id INTEGER, last_seq INTEGER, is_deleted BOOLEAN, email VARCHAR, plan VARCHAR);\nINSERT INTO c08_snapshot VALUES\n(90, 8, TRUE, NULL, NULL),\n(91, 3, FALSE, 'before@example.test', 'pro');\nDROP TABLE IF EXISTS c08_delta;\nCREATE TABLE c08_delta (ingest_id INTEGER, account_id INTEGER, source_seq INTEGER, ingested_at TIMESTAMP, operation VARCHAR, email VARCHAR, plan VARCHAR);\nINSERT INTO c08_delta VALUES\n(101, 90, 8, '2026-01-10 09:00:00', 'U', 'zombie@example.test', 'free'),\n(102, 90, 7, '2026-01-10 10:00:00', 'U', 'older@example.test', 'free'),\n(103, 91, 4, '2026-01-10 10:00:00', 'U', NULL, NULL),\n(104, 92, 1, '2026-01-10 10:00:00', 'D', 'discard@example.test', 'pro');",
+        "expected": {
+          "columns": [
+            "account_id",
+            "last_seq",
+            "is_deleted",
+            "email",
+            "plan"
+          ],
+          "rows": [
+            [
+              90,
+              8,
+              true,
+              null,
+              null
+            ],
+            [
+              91,
+              4,
+              false,
+              null,
+              null
+            ],
+            [
+              92,
+              1,
+              true,
+              null,
+              null
+            ]
+          ]
+        },
+        "explanation": "Equal/stale replay cannot undo a tombstone, a full upsert can clear both fields, and a deletion can be the first observed state."
+      },
+      {
+        "label": "Source order beats arrival order",
+        "setupSql": "DROP TABLE IF EXISTS c08_snapshot;\nCREATE TABLE c08_snapshot (account_id INTEGER, last_seq INTEGER, is_deleted BOOLEAN, email VARCHAR, plan VARCHAR);\nDROP TABLE IF EXISTS c08_delta;\nCREATE TABLE c08_delta (ingest_id INTEGER, account_id INTEGER, source_seq INTEGER, ingested_at TIMESTAMP, operation VARCHAR, email VARCHAR, plan VARCHAR);\nINSERT INTO c08_delta VALUES\n(201, 80, 5, '2026-01-10 08:00:00', 'U', 'winner@example.test', 'pro'),\n(202, 80, 4, '2026-01-10 09:00:00', 'D', NULL, NULL),\n(203, 81, 2, '2026-01-10 08:00:00', 'U', 'first@example.test', 'free'),\n(204, 81, 2, '2026-01-10 09:00:00', 'D', NULL, NULL),\n(205, 82, 1, '2026-01-11 00:00:00', 'U', 'excluded@example.test', 'free');",
+        "expected": {
+          "columns": [
+            "account_id",
+            "last_seq",
+            "is_deleted",
+            "email",
+            "plan"
+          ],
+          "rows": [
+            [
+              80,
+              5,
+              false,
+              "winner@example.test",
+              "pro"
+            ],
+            [
+              81,
+              2,
+              true,
+              null,
+              null
+            ]
+          ]
+        },
+        "explanation": "Older source sequence 4 loses despite arriving later; higher ingest ID resolves a same-sequence conflict to deletion; the exact cutoff is excluded."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB window functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/window_functions"
+      }
+    ]
+  },
+  {
+    "id": "09-refund-fanout",
+    "title": "Revenue when refunds multiply rows",
+    "difficulty": "Hard",
+    "tags": [
+      "Join cardinality",
+      "Pre-aggregation",
+      "Revenue"
+    ],
+    "prompt": "A finance model overstates January revenue after joining order lines to refunds. Produce a fanout-safe customer summary for paid orders placed in January 2026. Return customer_id, paid_orders, gross_cents, recognized_refund_cents, net_cents ordered by customer_id. Keep every customer with at least one qualifying order, including zero-value orders.",
+    "businessRules": [
+      "All timestamps are UTC. Include paid orders with ordered_at >= 2026-01-01 00:00:00 and < 2026-02-01 00:00:00; ignore cancelled or out-of-period orders.",
+      "Each line amount is already extended gross value, in non-negative integer cents. Sum every distinct line ID; equal amounts are not duplicates.",
+      "Only succeeded refunds count. All provided refunds are known as of the report run; do not impose a separate refund-date filter.",
+      "Cap recognized refunds at each order's gross amount, then aggregate to customer. Do not cap only after aggregating a customer's orders.",
+      "A paid order with no lines has gross 0 and still counts as one paid order. Missing refunds mean 0. An order's net amount cannot be negative.",
+      "Order, line, and refund IDs are unique within their respective tables. Refunds are attached to orders, not individual lines.",
+      "All IDs, customer IDs, statuses, timestamps, and amounts are non-NULL. Refund amounts are nonnegative integer cents."
+    ],
+    "tables": [
+      {
+        "name": "r09_orders",
+        "description": "One order header per order_id, with paid or cancelled status.",
+        "columns": [
+          {
+            "name": "order_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "customer_id",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "ordered_at",
+            "type": "TIMESTAMP"
+          },
+          {
+            "name": "status",
+            "type": "VARCHAR"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            "C1",
+            "2026-01-05 12:00:00",
+            "paid"
+          ],
+          [
+            2,
+            "C1",
+            "2026-01-20 12:00:00",
+            "paid"
+          ],
+          [
+            3,
+            "C2",
+            "2026-01-31 23:59:59",
+            "paid"
+          ],
+          [
+            4,
+            "C2",
+            "2026-02-01 00:00:00",
+            "paid"
+          ],
+          [
+            5,
+            "C3",
+            "2026-01-15 12:00:00",
+            "cancelled"
+          ],
+          [
+            6,
+            "C4",
+            "2026-01-18 12:00:00",
+            "paid"
+          ],
+          [
+            7,
+            "C5",
+            "2026-01-01 00:00:00",
+            "paid"
+          ]
+        ]
+      },
+      {
+        "name": "r09_lines",
+        "description": "Each line has its own extended gross amount in integer cents.",
+        "columns": [
+          {
+            "name": "line_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "order_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "amount_cents",
+            "type": "INTEGER"
+          }
+        ],
+        "rows": [
+          [
+            11,
+            1,
+            1000
+          ],
+          [
+            12,
+            1,
+            1000
+          ],
+          [
+            13,
+            2,
+            500
+          ],
+          [
+            14,
+            3,
+            700
+          ],
+          [
+            15,
+            3,
+            300
+          ],
+          [
+            16,
+            4,
+            999
+          ],
+          [
+            17,
+            5,
+            5000
+          ],
+          [
+            18,
+            7,
+            100
+          ],
+          [
+            19,
+            7,
+            100
+          ]
+        ]
+      },
+      {
+        "name": "r09_refunds",
+        "description": "Distinct refund IDs are independent refunds, even when their amounts match.",
+        "columns": [
+          {
+            "name": "refund_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "order_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "amount_cents",
+            "type": "INTEGER"
+          },
+          {
+            "name": "status",
+            "type": "VARCHAR"
+          }
+        ],
+        "rows": [
+          [
+            101,
+            1,
+            300,
+            "succeeded"
+          ],
+          [
+            102,
+            1,
+            200,
+            "succeeded"
+          ],
+          [
+            103,
+            1,
+            50,
+            "pending"
+          ],
+          [
+            104,
+            2,
+            700,
+            "succeeded"
+          ],
+          [
+            105,
+            4,
+            500,
+            "succeeded"
+          ],
+          [
+            106,
+            6,
+            50,
+            "succeeded"
+          ],
+          [
+            107,
+            7,
+            50,
+            "succeeded"
+          ],
+          [
+            108,
+            7,
+            50,
+            "succeeded"
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS r09_orders;\nCREATE TABLE r09_orders (order_id INTEGER, customer_id VARCHAR, ordered_at TIMESTAMP, status VARCHAR);\nINSERT INTO r09_orders VALUES\n(1, 'C1', '2026-01-05 12:00:00', 'paid'),\n(2, 'C1', '2026-01-20 12:00:00', 'paid'),\n(3, 'C2', '2026-01-31 23:59:59', 'paid'),\n(4, 'C2', '2026-02-01 00:00:00', 'paid'),\n(5, 'C3', '2026-01-15 12:00:00', 'cancelled'),\n(6, 'C4', '2026-01-18 12:00:00', 'paid'),\n(7, 'C5', '2026-01-01 00:00:00', 'paid');\nDROP TABLE IF EXISTS r09_lines;\nCREATE TABLE r09_lines (line_id INTEGER, order_id INTEGER, amount_cents INTEGER);\nINSERT INTO r09_lines VALUES\n(11, 1, 1000),\n(12, 1, 1000),\n(13, 2, 500),\n(14, 3, 700),\n(15, 3, 300),\n(16, 4, 999),\n(17, 5, 5000),\n(18, 7, 100),\n(19, 7, 100);\nDROP TABLE IF EXISTS r09_refunds;\nCREATE TABLE r09_refunds (refund_id INTEGER, order_id INTEGER, amount_cents INTEGER, status VARCHAR);\nINSERT INTO r09_refunds VALUES\n(101, 1, 300, 'succeeded'),\n(102, 1, 200, 'succeeded'),\n(103, 1, 50, 'pending'),\n(104, 2, 700, 'succeeded'),\n(105, 4, 500, 'succeeded'),\n(106, 6, 50, 'succeeded'),\n(107, 7, 50, 'succeeded'),\n(108, 7, 50, 'succeeded');",
+    "starterSql": "-- Aggregate each one-to-many table before combining them.\nSELECT * FROM r09_orders ORDER BY order_id;",
+    "solutionSql": "WITH line_totals AS (\n  SELECT order_id, SUM(amount_cents) AS gross_cents\n  FROM r09_lines GROUP BY order_id\n), refund_totals AS (\n  SELECT order_id, SUM(amount_cents) AS refund_cents\n  FROM r09_refunds\n  WHERE status = 'succeeded'\n  GROUP BY order_id\n), per_order AS (\n  SELECT o.order_id, o.customer_id,\n         COALESCE(l.gross_cents, 0) AS gross_cents,\n         LEAST(COALESCE(l.gross_cents, 0),\n               COALESCE(r.refund_cents, 0)) AS recognized_refund_cents\n  FROM r09_orders o\n  LEFT JOIN line_totals l ON o.order_id = l.order_id\n  LEFT JOIN refund_totals r ON o.order_id = r.order_id\n  WHERE o.status = 'paid'\n    AND o.ordered_at >= TIMESTAMP '2026-01-01 00:00:00'\n    AND o.ordered_at < TIMESTAMP '2026-02-01 00:00:00'\n)\nSELECT customer_id, COUNT(*) AS paid_orders,\n       SUM(gross_cents) AS gross_cents,\n       SUM(recognized_refund_cents) AS recognized_refund_cents,\n       SUM(gross_cents - recognized_refund_cents) AS net_cents\nFROM per_order\nGROUP BY customer_id\nORDER BY customer_id;",
+    "expected": {
+      "columns": [
+        "customer_id",
+        "paid_orders",
+        "gross_cents",
+        "recognized_refund_cents",
+        "net_cents"
+      ],
+      "rows": [
+        [
+          "C1",
+          2,
+          2500,
+          1000,
+          1500
+        ],
+        [
+          "C2",
+          1,
+          1000,
+          0,
+          1000
+        ],
+        [
+          "C4",
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          "C5",
+          1,
+          200,
+          100,
+          100
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Lines and refunds are independent one-to-many relationships. Joining both raw tables creates one row for every line/refund combination, so aggregate each child table to order_id first.",
+      "At one row per order, replace missing totals with zero and cap refunds by that order's gross. C1's over-refund on order 2 must not eat into order 1's revenue.",
+      "Only then group by customer. COUNT(*) is now safe because the per_order relation has exactly one row per qualifying order."
+    ],
+    "hints": [
+      "What is the row grain after joining two lines to two refunds? Calculate each side separately at order_id grain.",
+      "Join one-row-per-order totals to qualifying order headers with LEFT JOINs and COALESCE missing totals to zero.",
+      "Use LEAST(gross_cents, refund_cents) per order before the customer-level SUM. COUNT(*) becomes safe after this grain is established."
+    ],
+    "pitfalls": [
+      "Joining raw lines and refunds duplicates both monetary amounts.",
+      "SUM(DISTINCT amount_cents) incorrectly erases separate lines or refunds with the same value.",
+      "Capping at customer grain would recognize C1 refunds of 1200 instead of 1000.",
+      "Inner joins lose orders with no refunds or no lines.",
+      "An inclusive February 1 boundary wrongly includes order 4."
+    ],
+    "rowExplanations": [
+      {
+        "key": "C1",
+        "text": "Order 1 has gross 2000 and succeeded refunds 500. Order 2 has gross 500 and raw refund 700, capped to 500. Totals are gross 2500, recognized refunds 1000, net 1500."
+      },
+      {
+        "key": "C2",
+        "text": "Only order 3 qualifies; order 4 is exactly at the excluded February boundary. Gross 700 + 300 = 1000, no refund."
+      },
+      {
+        "key": "C4",
+        "text": "Order 6 is paid but has no lines, so it counts once with gross zero. Its refund is capped to zero."
+      },
+      {
+        "key": "C5",
+        "text": "Two separate 100-cent lines total 200; two distinct 50-cent refunds total 100. Equal amounts must not be deduplicated."
+      }
+    ],
+    "wrongQueries": [
+      {
+        "label": "Join both child tables before aggregating",
+        "sql": "WITH per_order AS (\n  SELECT o.order_id, o.customer_id,\n         COALESCE(SUM(l.amount_cents), 0) AS gross_cents,\n         LEAST(COALESCE(SUM(l.amount_cents), 0),\n               COALESCE(SUM(r.amount_cents), 0)) AS recognized_refund_cents\n  FROM r09_orders o\n  LEFT JOIN r09_lines l ON o.order_id = l.order_id\n  LEFT JOIN r09_refunds r ON o.order_id = r.order_id AND r.status = 'succeeded'\n  WHERE o.status = 'paid'\n    AND o.ordered_at >= TIMESTAMP '2026-01-01 00:00:00'\n    AND o.ordered_at < TIMESTAMP '2026-02-01 00:00:00'\n  GROUP BY o.order_id, o.customer_id\n)\nSELECT customer_id, COUNT(*) AS paid_orders,\n       SUM(gross_cents) AS gross_cents,\n       SUM(recognized_refund_cents) AS recognized_refund_cents,\n       SUM(gross_cents - recognized_refund_cents) AS net_cents\nFROM per_order GROUP BY customer_id ORDER BY customer_id;"
+      },
+      {
+        "label": "Use SUM(DISTINCT amount) to paper over fanout",
+        "sql": "WITH line_totals AS (\n  SELECT order_id, SUM(DISTINCT amount_cents) AS gross_cents\n  FROM r09_lines GROUP BY order_id\n), refund_totals AS (\n  SELECT order_id, SUM(DISTINCT amount_cents) AS refund_cents\n  FROM r09_refunds\n  WHERE status = 'succeeded'\n  GROUP BY order_id\n), per_order AS (\n  SELECT o.order_id, o.customer_id,\n         COALESCE(l.gross_cents, 0) AS gross_cents,\n         LEAST(COALESCE(l.gross_cents, 0),\n               COALESCE(r.refund_cents, 0)) AS recognized_refund_cents\n  FROM r09_orders o\n  LEFT JOIN line_totals l ON o.order_id = l.order_id\n  LEFT JOIN refund_totals r ON o.order_id = r.order_id\n  WHERE o.status = 'paid'\n    AND o.ordered_at >= TIMESTAMP '2026-01-01 00:00:00'\n    AND o.ordered_at < TIMESTAMP '2026-02-01 00:00:00'\n)\nSELECT customer_id, COUNT(*) AS paid_orders,\n       SUM(gross_cents) AS gross_cents,\n       SUM(recognized_refund_cents) AS recognized_refund_cents,\n       SUM(gross_cents - recognized_refund_cents) AS net_cents\nFROM per_order\nGROUP BY customer_id\nORDER BY customer_id;"
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Per-order cap versus customer cap",
+        "setupSql": "DROP TABLE IF EXISTS r09_orders;\nCREATE TABLE r09_orders (order_id INTEGER, customer_id VARCHAR, ordered_at TIMESTAMP, status VARCHAR);\nINSERT INTO r09_orders VALUES\n(91, 'X', '2026-01-10 00:00:00', 'paid'),\n(92, 'X', '2026-01-11 00:00:00', 'paid'),\n(93, 'Y', '2026-01-12 00:00:00', 'paid');\nDROP TABLE IF EXISTS r09_lines;\nCREATE TABLE r09_lines (line_id INTEGER, order_id INTEGER, amount_cents INTEGER);\nINSERT INTO r09_lines VALUES\n(901, 91, 100),\n(902, 92, 900);\nDROP TABLE IF EXISTS r09_refunds;\nCREATE TABLE r09_refunds (refund_id INTEGER, order_id INTEGER, amount_cents INTEGER, status VARCHAR);\nINSERT INTO r09_refunds VALUES\n(951, 91, 500, 'succeeded'),\n(952, 92, 100, 'pending');",
+        "expected": {
+          "columns": [
+            "customer_id",
+            "paid_orders",
+            "gross_cents",
+            "recognized_refund_cents",
+            "net_cents"
+          ],
+          "rows": [
+            [
+              "X",
+              2,
+              1000,
+              100,
+              900
+            ],
+            [
+              "Y",
+              1,
+              0,
+              0,
+              0
+            ]
+          ]
+        },
+        "explanation": "An excess refund on the 100-cent order cannot offset the other order; pending refunds contribute nothing; a no-line order remains."
+      },
+      {
+        "label": "Equal amounts are separate business events",
+        "setupSql": "DROP TABLE IF EXISTS r09_orders;\nCREATE TABLE r09_orders (order_id INTEGER, customer_id VARCHAR, ordered_at TIMESTAMP, status VARCHAR);\nINSERT INTO r09_orders VALUES\n(81, 'Z', '2026-01-01 00:00:00', 'paid'),\n(82, 'Z', '2026-02-01 00:00:00', 'paid'),\n(83, 'Q', '2026-01-15 00:00:00', 'cancelled');\nDROP TABLE IF EXISTS r09_lines;\nCREATE TABLE r09_lines (line_id INTEGER, order_id INTEGER, amount_cents INTEGER);\nINSERT INTO r09_lines VALUES\n(801, 81, 250),\n(802, 81, 250),\n(803, 82, 999),\n(804, 83, 999);\nDROP TABLE IF EXISTS r09_refunds;\nCREATE TABLE r09_refunds (refund_id INTEGER, order_id INTEGER, amount_cents INTEGER, status VARCHAR);\nINSERT INTO r09_refunds VALUES\n(851, 81, 50, 'succeeded'),\n(852, 81, 50, 'succeeded'),\n(853, 81, 50, 'pending');",
+        "expected": {
+          "columns": [
+            "customer_id",
+            "paid_orders",
+            "gross_cents",
+            "recognized_refund_cents",
+            "net_cents"
+          ],
+          "rows": [
+            [
+              "Z",
+              1,
+              500,
+              100,
+              400
+            ]
+          ]
+        },
+        "explanation": "The January start is included; February start and cancelled orders are excluded. Equal-value distinct lines and refunds all count."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB joins and FROM",
+        "url": "https://duckdb.org/docs/lts/sql/query_syntax/from"
+      }
+    ]
+  },
+  {
+    "id": "10-hierarchy-cycles",
+    "title": "Find the root, or explain why none exists",
+    "difficulty": "Expert",
+    "tags": [
+      "Recursive CTEs",
+      "Graph traversal",
+      "Data quality"
+    ],
+    "prompt": "An HR ingestion pipeline cannot assume its reporting hierarchy is a clean tree. For every employee, follow manager links and classify the entire chain. Return employee_id, chain_status, root_employee_id, depth_to_root, issue_node_id ordered by employee_id. The query must terminate without an arbitrary depth limit, including on cycles.",
+    "businessRules": [
+      "employee_id is unique and non-NULL. Each employee has at most one manager_id; NULL means a legitimate root. Multiple separate roots are allowed.",
+      "A chain is 'rooted' if it reaches an existing employee whose manager_id is NULL. Return that employee as root_employee_id and the number of manager edges as depth_to_root. A root has depth 0.",
+      "A chain is 'orphan' if it points to a manager ID absent from the table. issue_node_id is that missing ID, even for an employee several links below the break.",
+      "A chain is 'cycle' if following the next manager would revisit an ID already in this employee's path. issue_node_id is that first repeated ID for this particular starting employee.",
+      "For orphan/cycle chains, root_employee_id and depth_to_root are NULL. For rooted chains, issue_node_id is NULL. Return all employees, including those downstream of corrupt links.",
+      "Self-reporting is a cycle. Employee names are descriptive only; traverse by ID. No fixed maximum hierarchy depth is guaranteed."
+    ],
+    "tables": [
+      {
+        "name": "h10_employees",
+        "description": "Unique employee IDs with at most one manager each. The source can contain missing managers and cycles.",
+        "columns": [
+          {
+            "name": "employee_id",
+            "type": "INTEGER"
+          },
+          {
+            "name": "employee_name",
+            "type": "VARCHAR"
+          },
+          {
+            "name": "manager_id",
+            "type": "INTEGER"
+          }
+        ],
+        "rows": [
+          [
+            1,
+            "Ari",
+            null
+          ],
+          [
+            2,
+            "Bo",
+            1
+          ],
+          [
+            3,
+            "Cam",
+            2
+          ],
+          [
+            4,
+            "Dee",
+            1
+          ],
+          [
+            5,
+            "Eli",
+            99
+          ],
+          [
+            6,
+            "Flo",
+            5
+          ],
+          [
+            7,
+            "Gus",
+            8
+          ],
+          [
+            8,
+            "Hal",
+            9
+          ],
+          [
+            9,
+            "Ira",
+            7
+          ],
+          [
+            10,
+            "Jo",
+            8
+          ],
+          [
+            11,
+            "Kai",
+            11
+          ],
+          [
+            12,
+            "Lou",
+            2
+          ]
+        ]
+      }
+    ],
+    "setupSql": "DROP TABLE IF EXISTS h10_employees;\nCREATE TABLE h10_employees (employee_id INTEGER, employee_name VARCHAR, manager_id INTEGER);\nINSERT INTO h10_employees VALUES\n(1, 'Ari', NULL),\n(2, 'Bo', 1),\n(3, 'Cam', 2),\n(4, 'Dee', 1),\n(5, 'Eli', 99),\n(6, 'Flo', 5),\n(7, 'Gus', 8),\n(8, 'Hal', 9),\n(9, 'Ira', 7),\n(10, 'Jo', 8),\n(11, 'Kai', 11),\n(12, 'Lou', 2);",
+    "starterSql": "-- Track a path per starting employee; stop before revisiting a node.\nSELECT * FROM h10_employees ORDER BY employee_id;",
+    "solutionSql": "WITH RECURSIVE walk AS (\n  SELECT employee_id AS start_id, employee_id AS current_id, manager_id AS next_id,\n         [employee_id] AS path, 0 AS depth\n  FROM h10_employees\n  UNION ALL\n  SELECT w.start_id, m.employee_id, m.manager_id,\n         LIST_APPEND(w.path, m.employee_id), w.depth + 1\n  FROM walk w\n  JOIN h10_employees m ON w.next_id = m.employee_id\n  WHERE NOT LIST_CONTAINS(w.path, m.employee_id)\n), terminal AS (\n  SELECT w.*, m.employee_id AS next_exists\n  FROM walk w\n  LEFT JOIN h10_employees m ON w.next_id = m.employee_id\n  WHERE w.next_id IS NULL\n     OR m.employee_id IS NULL\n     OR LIST_CONTAINS(w.path, w.next_id)\n)\nSELECT start_id AS employee_id,\n       CASE WHEN next_id IS NULL THEN 'rooted'\n            WHEN next_exists IS NULL THEN 'orphan'\n            ELSE 'cycle' END AS chain_status,\n       CASE WHEN next_id IS NULL THEN current_id ELSE NULL END AS root_employee_id,\n       CASE WHEN next_id IS NULL THEN depth ELSE NULL END AS depth_to_root,\n       CASE WHEN next_id IS NULL THEN NULL ELSE next_id END AS issue_node_id\nFROM terminal\nORDER BY employee_id;",
+    "expected": {
+      "columns": [
+        "employee_id",
+        "chain_status",
+        "root_employee_id",
+        "depth_to_root",
+        "issue_node_id"
+      ],
+      "rows": [
+        [
+          1,
+          "rooted",
+          1,
+          0,
+          null
+        ],
+        [
+          2,
+          "rooted",
+          1,
+          1,
+          null
+        ],
+        [
+          3,
+          "rooted",
+          1,
+          2,
+          null
+        ],
+        [
+          4,
+          "rooted",
+          1,
+          1,
+          null
+        ],
+        [
+          5,
+          "orphan",
+          null,
+          null,
+          99
+        ],
+        [
+          6,
+          "orphan",
+          null,
+          null,
+          99
+        ],
+        [
+          7,
+          "cycle",
+          null,
+          null,
+          7
+        ],
+        [
+          8,
+          "cycle",
+          null,
+          null,
+          8
+        ],
+        [
+          9,
+          "cycle",
+          null,
+          null,
+          9
+        ],
+        [
+          10,
+          "cycle",
+          null,
+          null,
+          8
+        ],
+        [
+          11,
+          "cycle",
+          null,
+          null,
+          11
+        ],
+        [
+          12,
+          "rooted",
+          1,
+          2,
+          null
+        ]
+      ]
+    },
+    "orderedResults": true,
+    "explanation": [
+      "Seed one upward walk for every employee, not just roots. This preserves employees who belong to disconnected cycles or inherit a broken manager link.",
+      "Carry the IDs visited by that starting employee. Before traversing to the manager, verify the next ID is not already in the path. With a finite table and one manager per employee, this guarantees termination without inventing a depth cap.",
+      "A terminal row has a NULL next manager, a missing next manager, or a next manager already in its path. Classify those three cases and expose the requested diagnostic ID. Only a real root yields a valid depth."
+    ],
+    "hints": [
+      "Start a recursive CTE from every employee with path [employee_id], current node, next manager, and depth 0.",
+      "Join the next manager to the employee table, append the manager ID, and recurse only if that ID is not already in this path.",
+      "After recursion, select terminal paths: next_id IS NULL, next manager missing, or LIST_CONTAINS(path, next_id). These map to rooted, orphan, and cycle respectively."
+    ],
+    "pitfalls": [
+      "Starting only from roots silently omits cycles and orphans.",
+      "Using UNION instead of UNION ALL does not prevent cycles when depth or path changes on every visit.",
+      "A hard-coded maximum depth can misclassify a valid deep hierarchy.",
+      "A cycle's diagnostic ID depends on the starting employee; it is not necessarily the smallest ID in the cycle.",
+      "Returning the last existing manager as a root masks broken references."
+    ],
+    "rowExplanations": [
+      {
+        "key": "1,2,3,4,12",
+        "text": "All reach employee 1. Paths have 0, 1, 2, 1, and 2 edges respectively."
+      },
+      {
+        "key": "5,6",
+        "text": "Employee 5 points to absent 99; employee 6 follows 6 \u2192 5 \u2192 99. Both inherit orphan diagnostic 99."
+      },
+      {
+        "key": "7,8,9",
+        "text": "The cycle is 7 \u2192 8 \u2192 9 \u2192 7. Each starting member first repeats itself."
+      },
+      {
+        "key": "10",
+        "text": "Path 10 \u2192 8 \u2192 9 \u2192 7 would next revisit 8, so the issue ID is 8."
+      },
+      {
+        "key": "11",
+        "text": "11 immediately points back to itself, a one-node cycle."
+      }
+    ],
+    "wrongQueries": [
+      {
+        "label": "Traverse downward only from valid roots",
+        "sql": "WITH RECURSIVE rooted AS (\n  SELECT employee_id, employee_id AS root_employee_id, 0 AS depth_to_root\n  FROM h10_employees WHERE manager_id IS NULL\n  UNION ALL\n  SELECT e.employee_id, r.root_employee_id, r.depth_to_root + 1\n  FROM rooted r JOIN h10_employees e ON e.manager_id = r.employee_id\n)\nSELECT employee_id, 'rooted' AS chain_status, root_employee_id,\n       depth_to_root, NULL::INTEGER AS issue_node_id\nFROM rooted ORDER BY employee_id;"
+      }
+    ],
+    "edgeFixtures": [
+      {
+        "label": "Multiple legitimate roots and a broken branch",
+        "setupSql": "DROP TABLE IF EXISTS h10_employees;\nCREATE TABLE h10_employees (employee_id INTEGER, employee_name VARCHAR, manager_id INTEGER);\nINSERT INTO h10_employees VALUES\n(20, 'R1', NULL),\n(21, 'Child', 20),\n(22, 'R2', NULL),\n(23, 'Child2', 22),\n(24, 'Grandchild', 23),\n(25, 'Broken', 200);",
+        "expected": {
+          "columns": [
+            "employee_id",
+            "chain_status",
+            "root_employee_id",
+            "depth_to_root",
+            "issue_node_id"
+          ],
+          "rows": [
+            [
+              20,
+              "rooted",
+              20,
+              0,
+              null
+            ],
+            [
+              21,
+              "rooted",
+              20,
+              1,
+              null
+            ],
+            [
+              22,
+              "rooted",
+              22,
+              0,
+              null
+            ],
+            [
+              23,
+              "rooted",
+              22,
+              1,
+              null
+            ],
+            [
+              24,
+              "rooted",
+              22,
+              2,
+              null
+            ],
+            [
+              25,
+              "orphan",
+              null,
+              null,
+              200
+            ]
+          ]
+        },
+        "explanation": "Separate trees retain their own root IDs and edge counts; a missing manager remains an explicit orphan."
+      },
+      {
+        "label": "No roots: cycles and inherited orphans",
+        "setupSql": "DROP TABLE IF EXISTS h10_employees;\nCREATE TABLE h10_employees (employee_id INTEGER, employee_name VARCHAR, manager_id INTEGER);\nINSERT INTO h10_employees VALUES\n(41, 'CycleA', 42),\n(42, 'CycleB', 41),\n(43, 'CycleTail', 42),\n(44, 'Self', 44),\n(45, 'Missing', 999),\n(46, 'MissingTail', 45);",
+        "expected": {
+          "columns": [
+            "employee_id",
+            "chain_status",
+            "root_employee_id",
+            "depth_to_root",
+            "issue_node_id"
+          ],
+          "rows": [
+            [
+              41,
+              "cycle",
+              null,
+              null,
+              41
+            ],
+            [
+              42,
+              "cycle",
+              null,
+              null,
+              42
+            ],
+            [
+              43,
+              "cycle",
+              null,
+              null,
+              42
+            ],
+            [
+              44,
+              "cycle",
+              null,
+              null,
+              44
+            ],
+            [
+              45,
+              "orphan",
+              null,
+              null,
+              999
+            ],
+            [
+              46,
+              "orphan",
+              null,
+              null,
+              999
+            ]
+          ]
+        },
+        "explanation": "Every employee must survive even when no valid root exists; tails inherit cycle/missing-link status and identify the right repeated or missing ID."
+      },
+      {
+        "label": "Deep chain and long cycle",
+        "setupSql": "DROP TABLE IF EXISTS h10_employees;\nCREATE TABLE h10_employees (employee_id INTEGER, employee_name VARCHAR, manager_id INTEGER);\nINSERT INTO h10_employees VALUES\n(1000, 'Deep 1000', NULL),\n(1001, 'Deep 1001', 1000),\n(1002, 'Deep 1002', 1001),\n(1003, 'Deep 1003', 1002),\n(1004, 'Deep 1004', 1003),\n(1005, 'Deep 1005', 1004),\n(1006, 'Deep 1006', 1005),\n(1007, 'Deep 1007', 1006),\n(1008, 'Deep 1008', 1007),\n(1009, 'Deep 1009', 1008),\n(1010, 'Deep 1010', 1009),\n(1011, 'Deep 1011', 1010),\n(1012, 'Deep 1012', 1011),\n(1013, 'Deep 1013', 1012),\n(1014, 'Deep 1014', 1013),\n(1015, 'Deep 1015', 1014),\n(1016, 'Deep 1016', 1015),\n(1017, 'Deep 1017', 1016),\n(1018, 'Deep 1018', 1017),\n(1019, 'Deep 1019', 1018),\n(1020, 'Deep 1020', 1019),\n(1021, 'Deep 1021', 1020),\n(1022, 'Deep 1022', 1021),\n(1023, 'Deep 1023', 1022),\n(1024, 'Deep 1024', 1023),\n(1025, 'Deep 1025', 1024),\n(1026, 'Deep 1026', 1025),\n(1027, 'Deep 1027', 1026),\n(1028, 'Deep 1028', 1027),\n(1029, 'Deep 1029', 1028),\n(1030, 'Deep 1030', 1029),\n(1031, 'Deep 1031', 1030),\n(1032, 'Deep 1032', 1031),\n(2000, 'Cycle 2000', 2001),\n(2001, 'Cycle 2001', 2002),\n(2002, 'Cycle 2002', 2003),\n(2003, 'Cycle 2003', 2004),\n(2004, 'Cycle 2004', 2005),\n(2005, 'Cycle 2005', 2006),\n(2006, 'Cycle 2006', 2007),\n(2007, 'Cycle 2007', 2008),\n(2008, 'Cycle 2008', 2009),\n(2009, 'Cycle 2009', 2010),\n(2010, 'Cycle 2010', 2011),\n(2011, 'Cycle 2011', 2012),\n(2012, 'Cycle 2012', 2013),\n(2013, 'Cycle 2013', 2014),\n(2014, 'Cycle 2014', 2015),\n(2015, 'Cycle 2015', 2016),\n(2016, 'Cycle 2016', 2017),\n(2017, 'Cycle 2017', 2018),\n(2018, 'Cycle 2018', 2019),\n(2019, 'Cycle 2019', 2020),\n(2020, 'Cycle 2020', 2021),\n(2021, 'Cycle 2021', 2022),\n(2022, 'Cycle 2022', 2023),\n(2023, 'Cycle 2023', 2000),\n(2099, 'Cycle tail', 2003);",
+        "expected": {
+          "columns": [
+            "employee_id",
+            "chain_status",
+            "root_employee_id",
+            "depth_to_root",
+            "issue_node_id"
+          ],
+          "rows": [
+            [
+              1000,
+              "rooted",
+              1000,
+              0,
+              null
+            ],
+            [
+              1001,
+              "rooted",
+              1000,
+              1,
+              null
+            ],
+            [
+              1002,
+              "rooted",
+              1000,
+              2,
+              null
+            ],
+            [
+              1003,
+              "rooted",
+              1000,
+              3,
+              null
+            ],
+            [
+              1004,
+              "rooted",
+              1000,
+              4,
+              null
+            ],
+            [
+              1005,
+              "rooted",
+              1000,
+              5,
+              null
+            ],
+            [
+              1006,
+              "rooted",
+              1000,
+              6,
+              null
+            ],
+            [
+              1007,
+              "rooted",
+              1000,
+              7,
+              null
+            ],
+            [
+              1008,
+              "rooted",
+              1000,
+              8,
+              null
+            ],
+            [
+              1009,
+              "rooted",
+              1000,
+              9,
+              null
+            ],
+            [
+              1010,
+              "rooted",
+              1000,
+              10,
+              null
+            ],
+            [
+              1011,
+              "rooted",
+              1000,
+              11,
+              null
+            ],
+            [
+              1012,
+              "rooted",
+              1000,
+              12,
+              null
+            ],
+            [
+              1013,
+              "rooted",
+              1000,
+              13,
+              null
+            ],
+            [
+              1014,
+              "rooted",
+              1000,
+              14,
+              null
+            ],
+            [
+              1015,
+              "rooted",
+              1000,
+              15,
+              null
+            ],
+            [
+              1016,
+              "rooted",
+              1000,
+              16,
+              null
+            ],
+            [
+              1017,
+              "rooted",
+              1000,
+              17,
+              null
+            ],
+            [
+              1018,
+              "rooted",
+              1000,
+              18,
+              null
+            ],
+            [
+              1019,
+              "rooted",
+              1000,
+              19,
+              null
+            ],
+            [
+              1020,
+              "rooted",
+              1000,
+              20,
+              null
+            ],
+            [
+              1021,
+              "rooted",
+              1000,
+              21,
+              null
+            ],
+            [
+              1022,
+              "rooted",
+              1000,
+              22,
+              null
+            ],
+            [
+              1023,
+              "rooted",
+              1000,
+              23,
+              null
+            ],
+            [
+              1024,
+              "rooted",
+              1000,
+              24,
+              null
+            ],
+            [
+              1025,
+              "rooted",
+              1000,
+              25,
+              null
+            ],
+            [
+              1026,
+              "rooted",
+              1000,
+              26,
+              null
+            ],
+            [
+              1027,
+              "rooted",
+              1000,
+              27,
+              null
+            ],
+            [
+              1028,
+              "rooted",
+              1000,
+              28,
+              null
+            ],
+            [
+              1029,
+              "rooted",
+              1000,
+              29,
+              null
+            ],
+            [
+              1030,
+              "rooted",
+              1000,
+              30,
+              null
+            ],
+            [
+              1031,
+              "rooted",
+              1000,
+              31,
+              null
+            ],
+            [
+              1032,
+              "rooted",
+              1000,
+              32,
+              null
+            ],
+            [
+              2000,
+              "cycle",
+              null,
+              null,
+              2000
+            ],
+            [
+              2001,
+              "cycle",
+              null,
+              null,
+              2001
+            ],
+            [
+              2002,
+              "cycle",
+              null,
+              null,
+              2002
+            ],
+            [
+              2003,
+              "cycle",
+              null,
+              null,
+              2003
+            ],
+            [
+              2004,
+              "cycle",
+              null,
+              null,
+              2004
+            ],
+            [
+              2005,
+              "cycle",
+              null,
+              null,
+              2005
+            ],
+            [
+              2006,
+              "cycle",
+              null,
+              null,
+              2006
+            ],
+            [
+              2007,
+              "cycle",
+              null,
+              null,
+              2007
+            ],
+            [
+              2008,
+              "cycle",
+              null,
+              null,
+              2008
+            ],
+            [
+              2009,
+              "cycle",
+              null,
+              null,
+              2009
+            ],
+            [
+              2010,
+              "cycle",
+              null,
+              null,
+              2010
+            ],
+            [
+              2011,
+              "cycle",
+              null,
+              null,
+              2011
+            ],
+            [
+              2012,
+              "cycle",
+              null,
+              null,
+              2012
+            ],
+            [
+              2013,
+              "cycle",
+              null,
+              null,
+              2013
+            ],
+            [
+              2014,
+              "cycle",
+              null,
+              null,
+              2014
+            ],
+            [
+              2015,
+              "cycle",
+              null,
+              null,
+              2015
+            ],
+            [
+              2016,
+              "cycle",
+              null,
+              null,
+              2016
+            ],
+            [
+              2017,
+              "cycle",
+              null,
+              null,
+              2017
+            ],
+            [
+              2018,
+              "cycle",
+              null,
+              null,
+              2018
+            ],
+            [
+              2019,
+              "cycle",
+              null,
+              null,
+              2019
+            ],
+            [
+              2020,
+              "cycle",
+              null,
+              null,
+              2020
+            ],
+            [
+              2021,
+              "cycle",
+              null,
+              null,
+              2021
+            ],
+            [
+              2022,
+              "cycle",
+              null,
+              null,
+              2022
+            ],
+            [
+              2023,
+              "cycle",
+              null,
+              null,
+              2023
+            ],
+            [
+              2099,
+              "cycle",
+              null,
+              null,
+              2003
+            ]
+          ]
+        },
+        "explanation": "The valid chain reaches depth 32, so a shallow fixed-depth cutoff is wrong. The 24-node cycle still terminates by path membership, and its tail first repeats node 2003."
+      }
+    ],
+    "sources": [
+      {
+        "label": "DuckDB recursive CTEs",
+        "url": "https://duckdb.org/docs/lts/sql/query_syntax/with"
+      },
+      {
+        "label": "DuckDB list functions",
+        "url": "https://duckdb.org/docs/lts/sql/functions/list"
+      }
+    ]
+  }
+]

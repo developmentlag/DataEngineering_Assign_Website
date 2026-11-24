@@ -1,0 +1,3332 @@
+[
+  {
+    "id": "q01",
+    "title": "Flatten revisions without losing lineage",
+    "topic": "Nested JSON · schema · lineage",
+    "difficulty": "Advanced",
+    "summary": "Resolve duplicate order revisions, then flatten nested items without confusing missing values with nulls.",
+    "prompt": "An ingestion service receives full order snapshots out of order. Build the latest snapshot's item rows while preserving lineage and schema meaning. Empty orders must remain visible, and tags must not multiply item rows.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input: orders is a list of objects with a non-empty string order_id and an offset-aware ISO 8601 updated_at. items is missing, null, or a list of item objects. customer is missing, null, or an object whose id is a string or null.",
+        "Choose one full snapshot per order_id by greatest UTC instant in updated_at. Equal instants choose the later zero-based input index. Discarded snapshot indices are returned ascending, including every non-winner.",
+        "Emit rows sorted by order_id, then original zero-based item_index. For an empty/missing/null items array, emit one placeholder row with item_index, sku, qty, price all null; price_state is \"no_item\".",
+        "For a real item: sku is the given string or null if absent/null; qty defaults to 1 only when absent, and explicit null is preserved. price is a decimal string or null; price_state is \"absent\", \"null\", or \"value\" according to key presence and value. Prices are not calculated or rounded. When present and non-null, qty is a nonnegative integer and sku is a string.",
+        "Each row includes customer_id (null when unavailable), source_index of the winning order, and tags. tags is missing/null or a list of strings/nulls: trim whitespace, casefold, remove empty/null entries, deduplicate, and sort. Tags do not create rows.",
+        "Return {\"rows\": [...], \"discarded_source_indices\": [...]}. Each row has order_id, customer_id, source_index, item_index, sku, qty, price, price_state, tags. Timestamps serve revision selection only; no time window or numeric threshold applies.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # 1. Pick the winning revision for each order.\n    # 2. Emit item rows (or one empty-order row) with source lineage.\n    # 3. Return rows and discarded source indices.\n    return {\"rows\": [], \"discarded_source_indices\": []}\n",
+    "solutionCode": "from datetime import datetime, timezone\n\ndef solve(data):\n    winners = {}\n    for i, order in enumerate(data[\"orders\"]):\n        instant = datetime.fromisoformat(order[\"updated_at\"].replace(\"Z\", \"+00:00\")).astimezone(timezone.utc)\n        key = (instant, i)\n        previous = winners.get(order[\"order_id\"])\n        if previous is None or key > previous[0]:\n            winners[order[\"order_id\"]] = (key, order, i)\n    chosen = {entry[2] for entry in winners.values()}\n    rows = []\n    for order_id in sorted(winners):\n        _, order, source_index = winners[order_id]\n        customer = order.get(\"customer\") or {}\n        tags = sorted({t.strip().casefold() for t in (order.get(\"tags\") or []) if t is not None and t.strip()})\n        items = order.get(\"items\") or []\n        base = {\"order_id\": order_id, \"customer_id\": customer.get(\"id\"), \"source_index\": source_index, \"tags\": tags}\n        if not items:\n            rows.append({**base, \"item_index\": None, \"sku\": None, \"qty\": None, \"price\": None, \"price_state\": \"no_item\"})\n        for item_index, item in enumerate(items):\n            state = \"absent\" if \"price\" not in item else (\"null\" if item[\"price\"] is None else \"value\")\n            rows.append({**base, \"item_index\": item_index, \"sku\": item.get(\"sku\"), \"qty\": item.get(\"qty\", 1), \"price\": item.get(\"price\"), \"price_state\": state})\n    return {\"rows\": rows, \"discarded_source_indices\": [i for i in range(len(data[\"orders\"])) if i not in chosen]}\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Offset-aware revisions and empty orders",
+        "input": {
+          "orders": [
+            {
+              "order_id": "B",
+              "updated_at": "2026-01-01T10:00:00Z",
+              "customer": null,
+              "items": [],
+              "tags": [
+                " New ",
+                "new",
+                null
+              ]
+            },
+            {
+              "order_id": "A",
+              "updated_at": "2026-01-01T10:00:00Z",
+              "customer": {
+                "id": "c1"
+              },
+              "items": [
+                {
+                  "sku": "old",
+                  "price": "99.00"
+                }
+              ]
+            },
+            {
+              "order_id": "A",
+              "updated_at": "2026-01-01T12:00:00+02:00",
+              "customer": {
+                "id": "c2"
+              },
+              "items": [
+                {
+                  "sku": "s1",
+                  "qty": 0,
+                  "price": null
+                },
+                {
+                  "sku": "s2",
+                  "qty": null
+                }
+              ],
+              "tags": [
+                " VIP ",
+                "vip",
+                " Rush "
+              ]
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "order_id": "A",
+              "customer_id": "c2",
+              "source_index": 2,
+              "item_index": 0,
+              "sku": "s1",
+              "qty": 0,
+              "price": null,
+              "price_state": "null",
+              "tags": [
+                "rush",
+                "vip"
+              ]
+            },
+            {
+              "order_id": "A",
+              "customer_id": "c2",
+              "source_index": 2,
+              "item_index": 1,
+              "sku": "s2",
+              "qty": null,
+              "price": null,
+              "price_state": "absent",
+              "tags": [
+                "rush",
+                "vip"
+              ]
+            },
+            {
+              "order_id": "B",
+              "customer_id": null,
+              "source_index": 0,
+              "item_index": null,
+              "sku": null,
+              "qty": null,
+              "price": null,
+              "price_state": "no_item",
+              "tags": [
+                "new"
+              ]
+            }
+          ],
+          "discarded_source_indices": [
+            1
+          ]
+        },
+        "explanation": [
+          "A at 12:00 +02:00 equals A at 10:00 UTC, so source index 2 wins the tie; index 1 is discarded.",
+          "A item 0 keeps qty=0 and an explicitly null price. Item 1 keeps qty=null and records an absent price key.",
+          "A tags normalize to rush and vip without multiplying rows. B has no items, so its placeholder preserves the order."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-empty",
+        "name": "Missing arrays and absent quantities",
+        "input": {
+          "orders": [
+            {
+              "order_id": "Z",
+              "updated_at": "2026-01-01T00:00:00Z"
+            },
+            {
+              "order_id": "A",
+              "updated_at": "2026-01-01T00:00:00Z",
+              "items": [
+                {
+                  "price": "0.00"
+                }
+              ],
+              "tags": [
+                " Straße ",
+                "STRASSE",
+                " ",
+                null
+              ]
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "order_id": "A",
+              "customer_id": null,
+              "source_index": 1,
+              "item_index": 0,
+              "sku": null,
+              "qty": 1,
+              "price": "0.00",
+              "price_state": "value",
+              "tags": [
+                "strasse"
+              ]
+            },
+            {
+              "order_id": "Z",
+              "customer_id": null,
+              "source_index": 0,
+              "item_index": null,
+              "sku": null,
+              "qty": null,
+              "price": null,
+              "price_state": "no_item",
+              "tags": []
+            }
+          ],
+          "discarded_source_indices": []
+        },
+        "explanation": [
+          "A sorts before Z despite input order. Missing qty defaults to 1; the string 0.00 is a present value.",
+          "Z lacks an items key, producing one placeholder rather than disappearing.",
+          "Straße and STRASSE casefold to the same strasse tag; lower() alone would not deduplicate them."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-time",
+        "name": "Timestamp text is not timestamp order",
+        "input": {
+          "orders": [
+            {
+              "order_id": "X",
+              "updated_at": "2026-01-01T09:30:00Z",
+              "items": null
+            },
+            {
+              "order_id": "X",
+              "updated_at": "2026-01-01T10:00:00+02:00",
+              "items": [
+                {
+                  "sku": "stale"
+                }
+              ]
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "order_id": "X",
+              "customer_id": null,
+              "source_index": 0,
+              "item_index": null,
+              "sku": null,
+              "qty": null,
+              "price": null,
+              "price_state": "no_item",
+              "tags": []
+            }
+          ],
+          "discarded_source_indices": [
+            1
+          ]
+        },
+        "explanation": [
+          "10:00 +02:00 is 08:00 UTC, earlier than 09:30 UTC. Source 0 wins even though source 1 occurs later in the list."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-no-orders",
+        "name": "Empty ingestion batch",
+        "input": {
+          "orders": []
+        },
+        "expected": {
+          "rows": [],
+          "discarded_source_indices": []
+        },
+        "explanation": [
+          "No orders means no rows and no discarded indices."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "First make a dictionary keyed by order_id. Compare parsed instants, with input index as the secondary key.",
+      "Use key membership to distinguish an absent price from a present null. dict.get alone cannot tell these apart.",
+      "Flatten only items. Normalize tags separately, carry the winning source index onto every row, and explicitly emit an empty-order placeholder."
+    ],
+    "explanation": [
+      "Parse each updated_at into an aware datetime and compare (UTC instant, input index). This makes revision choice independent of timestamp formatting.",
+      "Retain winner indices; their complement in the original input supplies discarded_source_indices in ascending order.",
+      "Walk winners by sorted order_id. Create lineage and customer fields once for the snapshot; normalize tags once per snapshot.",
+      "Walk item positions without reordering them. Membership tests preserve absent/null/value price states and get(\"qty\", 1) preserves explicit nulls and zero.",
+      "Emit an explicit placeholder for every winner without items. The baseline consequently has exactly three rows: two for A and one for B."
+    ],
+    "complexity": "O(N + R log R + M + sum(T log T)) time, where N is snapshots, R winning orders, M winning items, and T unique tags per winner. O(R + output size) additional space.",
+    "limitations": [
+      "This is full-snapshot replacement, not field-level merging. Malformed timestamps and nonconforming item types are outside the input contract.",
+      "The function materializes its output; production-scale flattening may need a generator and a persisted schema contract."
+    ],
+    "followUp": "How would you track field-level schema drift and preserve lineage if each revision were a partial patch rather than a full snapshot?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: latest arrival wins even when its timestamp is older",
+        "code": "from datetime import datetime, timezone\n\ndef solve(data):\n    winners = {}\n    for i, order in enumerate(data[\"orders\"]):\n        instant = datetime.fromisoformat(order[\"updated_at\"].replace(\"Z\", \"+00:00\")).astimezone(timezone.utc)\n        key = (instant, i)\n        previous = winners.get(order[\"order_id\"])\n        if True:\n            winners[order[\"order_id\"]] = (key, order, i)\n    chosen = {entry[2] for entry in winners.values()}\n    rows = []\n    for order_id in sorted(winners):\n        _, order, source_index = winners[order_id]\n        customer = order.get(\"customer\") or {}\n        tags = sorted({t.strip().casefold() for t in (order.get(\"tags\") or []) if t is not None and t.strip()})\n        items = order.get(\"items\") or []\n        base = {\"order_id\": order_id, \"customer_id\": customer.get(\"id\"), \"source_index\": source_index, \"tags\": tags}\n        if not items:\n            rows.append({**base, \"item_index\": None, \"sku\": None, \"qty\": None, \"price\": None, \"price_state\": \"no_item\"})\n        for item_index, item in enumerate(items):\n            state = \"absent\" if \"price\" not in item else (\"null\" if item[\"price\"] is None else \"value\")\n            rows.append({**base, \"item_index\": item_index, \"sku\": item.get(\"sku\"), \"qty\": item.get(\"qty\", 1), \"price\": item.get(\"price\"), \"price_state\": state})\n    return {\"rows\": rows, \"discarded_source_indices\": [i for i in range(len(data[\"orders\"])) if i not in chosen]}\n"
+      },
+      {
+        "label": "Wrong: lower() substitutes for Unicode casefold()",
+        "code": "from datetime import datetime, timezone\n\ndef solve(data):\n    winners = {}\n    for i, order in enumerate(data[\"orders\"]):\n        instant = datetime.fromisoformat(order[\"updated_at\"].replace(\"Z\", \"+00:00\")).astimezone(timezone.utc)\n        key = (instant, i)\n        previous = winners.get(order[\"order_id\"])\n        if previous is None or key > previous[0]:\n            winners[order[\"order_id\"]] = (key, order, i)\n    chosen = {entry[2] for entry in winners.values()}\n    rows = []\n    for order_id in sorted(winners):\n        _, order, source_index = winners[order_id]\n        customer = order.get(\"customer\") or {}\n        tags = sorted({t.strip().lower() for t in (order.get(\"tags\") or []) if t is not None and t.strip()})\n        items = order.get(\"items\") or []\n        base = {\"order_id\": order_id, \"customer_id\": customer.get(\"id\"), \"source_index\": source_index, \"tags\": tags}\n        if not items:\n            rows.append({**base, \"item_index\": None, \"sku\": None, \"qty\": None, \"price\": None, \"price_state\": \"no_item\"})\n        for item_index, item in enumerate(items):\n            state = \"absent\" if \"price\" not in item else (\"null\" if item[\"price\"] is None else \"value\")\n            rows.append({**base, \"item_index\": item_index, \"sku\": item.get(\"sku\"), \"qty\": item.get(\"qty\", 1), \"price\": item.get(\"price\"), \"price_state\": state})\n    return {\"rows\": rows, \"discarded_source_indices\": [i for i in range(len(data[\"orders\"])) if i not in chosen]}\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q02",
+    "title": "Reconcile invoices to the minor unit",
+    "topic": "Decimal · rounding · reconciliation",
+    "difficulty": "Advanced",
+    "summary": "Audit multi-currency invoices with per-line rounding, refunds, and an inclusive tolerance.",
+    "prompt": "A billing export and a settlement export disagree near rounding boundaries. Reconcile invoices using decimal arithmetic, explain the signed difference, and keep unmatched settled payments visible.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input: invoices have unique string invoice_id, currency (USD or JPY), and lines of {qty: nonnegative integer, unit_price: nonnegative decimal string}. Payments have unique string payment_id, invoice_id, currency, amount (signed decimal string), and state (settled or pending). Amounts are finite with at most 12 significant digits; quantities are at most 1,000,000. Decimal strings use ordinary notation with digits before the optional point, at most 12 digits before the point and 6 after it, no exponent, no embedded whitespace, and optional leading sign for payment amounts only.",
+        "USD has 2 decimal places; JPY has 0. Use Decimal and ROUND_HALF_UP. Round each qty × unit_price line separately to its currency unit, then sum rounded lines. An empty invoice totals zero.",
+        "Only settled payments count. Round each payment amount separately before summing. Negative payments are refunds. A payment matches only when BOTH invoice_id and currency match.",
+        "Return rows sorted by invoice_id, each with invoice_id, currency, due, paid, delta, status. due/paid/delta are fixed-scale strings. delta = paid - due; normalize a signed zero to ordinary zero.",
+        "Status is \"settled\" when abs(delta) is at most one minor unit (inclusive: 0.01 USD or 1 JPY), otherwise \"underpaid\" for negative delta and \"overpaid\" for positive delta. No float tolerance is used.",
+        "Also return orphan_payment_ids: sorted payment IDs for settled payments without an exact invoice/currency match. Pending payments are ignored even when unmatched. No timestamps or time-zone rules apply.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # Decimal strings -> round individual lines/payments -> reconcile.\n    return {\"rows\": [], \"orphan_payment_ids\": []}\n",
+    "solutionCode": "from decimal import Decimal, localcontext, ROUND_HALF_UP\n\ndef solve(data):\n    units = {\"USD\": Decimal(\"0.01\"), \"JPY\": Decimal(\"1\")}\n    scales = {\"USD\": 2, \"JPY\": 0}\n    with localcontext() as ctx:\n        ctx.prec = 50\n        invoices = {i[\"invoice_id\"]: i for i in data[\"invoices\"]}\n        paid = {i: Decimal(0) for i in invoices}\n        orphans = []\n        for p in data[\"payments\"]:\n            if p[\"state\"] != \"settled\":\n                continue\n            invoice = invoices.get(p[\"invoice_id\"])\n            if invoice is None or invoice[\"currency\"] != p[\"currency\"]:\n                orphans.append(p[\"payment_id\"])\n                continue\n            paid[p[\"invoice_id\"]] += Decimal(p[\"amount\"]).quantize(units[p[\"currency\"]], rounding=ROUND_HALF_UP)\n        rows = []\n        for invoice_id in sorted(invoices):\n            inv = invoices[invoice_id]\n            currency = inv[\"currency\"]\n            unit = units[currency]\n            due = sum(((Decimal(line[\"qty\"]) * Decimal(line[\"unit_price\"])).quantize(unit, rounding=ROUND_HALF_UP) for line in inv[\"lines\"]), Decimal(0))\n            received = paid[invoice_id]\n            delta = received - due\n            status = \"settled\" if abs(delta) <= unit else (\"underpaid\" if delta < 0 else \"overpaid\")\n            def formatted(value):\n                return format(abs(value) if value == 0 else value, f\".{scales[currency]}f\")\n            rows.append({\"invoice_id\": invoice_id, \"currency\": currency, \"due\": formatted(due), \"paid\": formatted(received), \"delta\": formatted(delta), \"status\": status})\n        return {\"rows\": rows, \"orphan_payment_ids\": sorted(orphans)}\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Round lines, not the invoice total",
+        "input": {
+          "invoices": [
+            {
+              "invoice_id": "I2",
+              "currency": "JPY",
+              "lines": [
+                {
+                  "qty": 1,
+                  "unit_price": "100.5"
+                },
+                {
+                  "qty": 2,
+                  "unit_price": "0.25"
+                }
+              ]
+            },
+            {
+              "invoice_id": "I1",
+              "currency": "USD",
+              "lines": [
+                {
+                  "qty": 1,
+                  "unit_price": "10.005"
+                },
+                {
+                  "qty": 3,
+                  "unit_price": "2.335"
+                }
+              ]
+            }
+          ],
+          "payments": [
+            {
+              "payment_id": "p1",
+              "invoice_id": "I1",
+              "currency": "USD",
+              "amount": "17.01",
+              "state": "settled"
+            },
+            {
+              "payment_id": "p2",
+              "invoice_id": "I2",
+              "currency": "JPY",
+              "amount": "105",
+              "state": "settled"
+            },
+            {
+              "payment_id": "p3",
+              "invoice_id": "I1",
+              "currency": "USD",
+              "amount": "50",
+              "state": "pending"
+            },
+            {
+              "payment_id": "p4",
+              "invoice_id": "missing",
+              "currency": "USD",
+              "amount": "4.005",
+              "state": "settled"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "invoice_id": "I1",
+              "currency": "USD",
+              "due": "17.02",
+              "paid": "17.01",
+              "delta": "-0.01",
+              "status": "settled"
+            },
+            {
+              "invoice_id": "I2",
+              "currency": "JPY",
+              "due": "102",
+              "paid": "105",
+              "delta": "3",
+              "status": "overpaid"
+            }
+          ],
+          "orphan_payment_ids": [
+            "p4"
+          ]
+        },
+        "explanation": [
+          "I1: 10.005 rounds to 10.01 and 3 × 2.335 = 7.005 rounds to 7.01. Due is 17.02, not 17.01.",
+          "I1 receives 17.01; its -0.01 difference is exactly the inclusive USD tolerance, so it is settled. Pending p3 adds nothing.",
+          "I2: 100.5 rounds to 101 and 2 × 0.25 rounds to 1; due 102 versus paid 105 gives +3, overpaid.",
+          "p4 has no matching invoice, so its ID remains in the orphan list."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-refund",
+        "name": "Half-up refunds and wrong-currency payments",
+        "input": {
+          "invoices": [
+            {
+              "invoice_id": "A",
+              "currency": "USD",
+              "lines": [
+                {
+                  "qty": 1,
+                  "unit_price": "1.00"
+                }
+              ]
+            },
+            {
+              "invoice_id": "B",
+              "currency": "USD",
+              "lines": []
+            }
+          ],
+          "payments": [
+            {
+              "payment_id": "r",
+              "invoice_id": "A",
+              "currency": "USD",
+              "amount": "-0.005",
+              "state": "settled"
+            },
+            {
+              "payment_id": "s",
+              "invoice_id": "A",
+              "currency": "USD",
+              "amount": "1.00",
+              "state": "settled"
+            },
+            {
+              "payment_id": "j",
+              "invoice_id": "A",
+              "currency": "JPY",
+              "amount": "1",
+              "state": "settled"
+            },
+            {
+              "payment_id": "z",
+              "invoice_id": "B",
+              "currency": "USD",
+              "amount": "-0.000",
+              "state": "settled"
+            },
+            {
+              "payment_id": "p",
+              "invoice_id": "ghost",
+              "currency": "USD",
+              "amount": "9",
+              "state": "pending"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "invoice_id": "A",
+              "currency": "USD",
+              "due": "1.00",
+              "paid": "0.99",
+              "delta": "-0.01",
+              "status": "settled"
+            },
+            {
+              "invoice_id": "B",
+              "currency": "USD",
+              "due": "0.00",
+              "paid": "0.00",
+              "delta": "0.00",
+              "status": "settled"
+            }
+          ],
+          "orphan_payment_ids": [
+            "j"
+          ]
+        },
+        "explanation": [
+          "The -0.005 refund rounds away from zero to -0.01. A receives 0.99 and is within one cent.",
+          "Payment j references A but has JPY currency, so it is an orphan. Pending p is entirely ignored.",
+          "B has no lines and a zero payment; all displayed zeros are unsigned and use two decimal places."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-threshold",
+        "name": "One unit is accepted; two units are not",
+        "input": {
+          "invoices": [
+            {
+              "invoice_id": "A",
+              "currency": "JPY",
+              "lines": [
+                {
+                  "qty": 1,
+                  "unit_price": "2"
+                }
+              ]
+            },
+            {
+              "invoice_id": "B",
+              "currency": "USD",
+              "lines": [
+                {
+                  "qty": 1,
+                  "unit_price": "1"
+                }
+              ]
+            }
+          ],
+          "payments": [
+            {
+              "payment_id": "p",
+              "invoice_id": "A",
+              "currency": "JPY",
+              "amount": "3",
+              "state": "settled"
+            },
+            {
+              "payment_id": "q",
+              "invoice_id": "B",
+              "currency": "USD",
+              "amount": "0.98",
+              "state": "settled"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "invoice_id": "A",
+              "currency": "JPY",
+              "due": "2",
+              "paid": "3",
+              "delta": "1",
+              "status": "settled"
+            },
+            {
+              "invoice_id": "B",
+              "currency": "USD",
+              "due": "1.00",
+              "paid": "0.98",
+              "delta": "-0.02",
+              "status": "underpaid"
+            }
+          ],
+          "orphan_payment_ids": []
+        },
+        "explanation": [
+          "A is over by exactly 1 JPY and is settled. B is short 0.02 USD, beyond the one-cent tolerance, so it is underpaid."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "Construct Decimal directly from the input strings. Do not pass through float.",
+      "Round each invoice line and each settled payment before summing. The two exports must use the same minor-unit rule.",
+      "Use (invoice_id, currency) matching, compute paid minus due, and compare the absolute difference with an inclusive one-unit threshold."
+    ],
+    "explanation": [
+      "Choose a Decimal unit for each currency, and keep a high local precision for multiplication and summation.",
+      "Index invoices and collect only settled, same-currency payments. Add unmatched settled IDs to a separate audit list.",
+      "Quantize each line with ROUND_HALF_UP before summation; this is the source of the baseline 17.02 USD invoice.",
+      "Compute the signed delta and apply the inclusive tolerance before choosing underpaid or overpaid.",
+      "Format monetary fields with the currency’s exact scale and normalize negative zero. Never return Decimal objects to JSON."
+    ],
+    "complexity": "O(L + P + I log I + O log O) time for L lines, P payments, I invoices, O orphan IDs; O(I + O + output size) space.",
+    "limitations": [
+      "This policy deliberately tolerates one minor unit. Real reconciliation thresholds must come from an explicit business contract.",
+      "There is no foreign-exchange conversion, payment deduplication, or allocation across invoices; payment IDs are unique by contract."
+    ],
+    "followUp": "How would you reconcile partial allocations or FX conversions while keeping every rounding adjustment auditable?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: half-even rounding replaces the required half-up policy",
+        "code": "from decimal import Decimal, localcontext, ROUND_HALF_UP, ROUND_HALF_EVEN\n\ndef solve(data):\n    units = {\"USD\": Decimal(\"0.01\"), \"JPY\": Decimal(\"1\")}\n    scales = {\"USD\": 2, \"JPY\": 0}\n    with localcontext() as ctx:\n        ctx.prec = 50\n        invoices = {i[\"invoice_id\"]: i for i in data[\"invoices\"]}\n        paid = {i: Decimal(0) for i in invoices}\n        orphans = []\n        for p in data[\"payments\"]:\n            if p[\"state\"] != \"settled\":\n                continue\n            invoice = invoices.get(p[\"invoice_id\"])\n            if invoice is None or invoice[\"currency\"] != p[\"currency\"]:\n                orphans.append(p[\"payment_id\"])\n                continue\n            paid[p[\"invoice_id\"]] += Decimal(p[\"amount\"]).quantize(units[p[\"currency\"]], rounding=ROUND_HALF_EVEN)\n        rows = []\n        for invoice_id in sorted(invoices):\n            inv = invoices[invoice_id]\n            currency = inv[\"currency\"]\n            unit = units[currency]\n            due = sum(((Decimal(line[\"qty\"]) * Decimal(line[\"unit_price\"])).quantize(unit, rounding=ROUND_HALF_EVEN) for line in inv[\"lines\"]), Decimal(0))\n            received = paid[invoice_id]\n            delta = received - due\n            status = \"settled\" if abs(delta) <= unit else (\"underpaid\" if delta < 0 else \"overpaid\")\n            def formatted(value):\n                return format(abs(value) if value == 0 else value, f\".{scales[currency]}f\")\n            rows.append({\"invoice_id\": invoice_id, \"currency\": currency, \"due\": formatted(due), \"paid\": formatted(received), \"delta\": formatted(delta), \"status\": status})\n        return {\"rows\": rows, \"orphan_payment_ids\": sorted(orphans)}\n"
+      },
+      {
+        "label": "Wrong: tolerance excludes exact one-unit differences",
+        "code": "from decimal import Decimal, localcontext, ROUND_HALF_UP\n\ndef solve(data):\n    units = {\"USD\": Decimal(\"0.01\"), \"JPY\": Decimal(\"1\")}\n    scales = {\"USD\": 2, \"JPY\": 0}\n    with localcontext() as ctx:\n        ctx.prec = 50\n        invoices = {i[\"invoice_id\"]: i for i in data[\"invoices\"]}\n        paid = {i: Decimal(0) for i in invoices}\n        orphans = []\n        for p in data[\"payments\"]:\n            if p[\"state\"] != \"settled\":\n                continue\n            invoice = invoices.get(p[\"invoice_id\"])\n            if invoice is None or invoice[\"currency\"] != p[\"currency\"]:\n                orphans.append(p[\"payment_id\"])\n                continue\n            paid[p[\"invoice_id\"]] += Decimal(p[\"amount\"]).quantize(units[p[\"currency\"]], rounding=ROUND_HALF_UP)\n        rows = []\n        for invoice_id in sorted(invoices):\n            inv = invoices[invoice_id]\n            currency = inv[\"currency\"]\n            unit = units[currency]\n            due = sum(((Decimal(line[\"qty\"]) * Decimal(line[\"unit_price\"])).quantize(unit, rounding=ROUND_HALF_UP) for line in inv[\"lines\"]), Decimal(0))\n            received = paid[invoice_id]\n            delta = received - due\n            status = \"settled\" if abs(delta) < unit else (\"underpaid\" if delta < 0 else \"overpaid\")\n            def formatted(value):\n                return format(abs(value) if value == 0 else value, f\".{scales[currency]}f\")\n            rows.append({\"invoice_id\": invoice_id, \"currency\": currency, \"due\": formatted(due), \"paid\": formatted(received), \"delta\": formatted(delta), \"status\": status})\n        return {\"rows\": rows, \"orphan_payment_ids\": sorted(orphans)}\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q03",
+    "title": "Walk pages with deterministic retries",
+    "topic": "State machine · retry · pagination",
+    "difficulty": "Advanced",
+    "summary": "Simulate a resilient API reader without a network, clock, or sleep.",
+    "prompt": "You are reviewing a paginated ingestion client's control flow. Given scripted responses, return the collected records and a complete deterministic request/retry trace. A broken next-page cursor must not cause an infinite loop.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input has start_token (string), responses (mapping token to a list of scripted responses), max_retries (nonnegative integer), base_delay (positive integer seconds), and max_delay (positive integer seconds). This is a pure simulation: do not perform requests or sleep.",
+        "For a token, consume responses in list order. attempt is 1-based and resets to 1 for each new page. Missing token or exhausted responses returns outcome \"missing_response\" without logging a nonexistent request.",
+        "A 200 response has items (objects with a string id and JSON value) and next_token (string or null). Append first-seen IDs in encounter order, retaining their first complete object. Duplicates on later pages never overwrite them.",
+        "Only status 429 or 503 is retryable. max_retries is the number of extra attempts after the initial attempt, separately for each page. Before retry attempt a+1, record delay = min(max_delay, max(base_delay × 2^(a-1), retry_after or 0)); retry_after is a nonnegative integer if present. Do not wait after the final failed attempt.",
+        "Any other non-200 status terminates as \"http_<status>\". Exhausted retryable errors terminate the same way. Preserve all items already collected on earlier successful pages.",
+        "After a 200: null next_token gives \"complete\". If the next token was already successfully fetched (including the current page), stop with \"cursor_cycle\"; do not request it again. Otherwise move to it with its retry budget reset.",
+        "Return {items: [...], requests: [{token, attempt, status}], waits: [{token, after_attempt, seconds}], outcome: string}. Request/wait order is execution order. There are no timestamps, timezones, null record IDs, random jitter, or rounding.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # Track page cursor, per-page attempts, seen IDs, and successful cursors.\n    return {\"items\": [], \"requests\": [], \"waits\": [], \"outcome\": \"complete\"}\n",
+    "solutionCode": "def solve(data):\n    result = {\"items\": [], \"requests\": [], \"waits\": [], \"outcome\": None}\n    seen_ids, completed_tokens = set(), set()\n    token = data[\"start_token\"]\n    while True:\n        script = data[\"responses\"].get(token, [])\n        for attempt in range(1, data[\"max_retries\"] + 2):\n            if attempt > len(script):\n                result[\"outcome\"] = \"missing_response\"\n                return result\n            response = script[attempt - 1]\n            status = response[\"status\"]\n            result[\"requests\"].append({\"token\": token, \"attempt\": attempt, \"status\": status})\n            if status == 200:\n                for item in response[\"items\"]:\n                    if item[\"id\"] not in seen_ids:\n                        seen_ids.add(item[\"id\"])\n                        result[\"items\"].append(dict(item))\n                completed_tokens.add(token)\n                next_token = response[\"next_token\"]\n                if next_token is None:\n                    result[\"outcome\"] = \"complete\"\n                    return result\n                if next_token in completed_tokens:\n                    result[\"outcome\"] = \"cursor_cycle\"\n                    return result\n                token = next_token\n                break\n            if status not in (429, 503) or attempt > data[\"max_retries\"]:\n                result[\"outcome\"] = f\"http_{status}\"\n                return result\n            delay = min(data[\"max_delay\"], max(data[\"base_delay\"] * 2 ** (attempt - 1), response.get(\"retry_after\", 0)))\n            result[\"waits\"].append({\"token\": token, \"after_attempt\": attempt, \"seconds\": delay})\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Retry-after, page duplicates, and a reset budget",
+        "input": {
+          "start_token": "start",
+          "max_retries": 2,
+          "base_delay": 2,
+          "max_delay": 5,
+          "responses": {
+            "start": [
+              {
+                "status": 429,
+                "retry_after": 7
+              },
+              {
+                "status": 200,
+                "items": [
+                  {
+                    "id": "a",
+                    "value": 10
+                  },
+                  {
+                    "id": "b",
+                    "value": 20
+                  }
+                ],
+                "next_token": "p2"
+              }
+            ],
+            "p2": [
+              {
+                "status": 503
+              },
+              {
+                "status": 200,
+                "items": [
+                  {
+                    "id": "b",
+                    "value": 999
+                  },
+                  {
+                    "id": "c",
+                    "value": 30
+                  }
+                ],
+                "next_token": null
+              }
+            ]
+          }
+        },
+        "expected": {
+          "items": [
+            {
+              "id": "a",
+              "value": 10
+            },
+            {
+              "id": "b",
+              "value": 20
+            },
+            {
+              "id": "c",
+              "value": 30
+            }
+          ],
+          "requests": [
+            {
+              "token": "start",
+              "attempt": 1,
+              "status": 429
+            },
+            {
+              "token": "start",
+              "attempt": 2,
+              "status": 200
+            },
+            {
+              "token": "p2",
+              "attempt": 1,
+              "status": 503
+            },
+            {
+              "token": "p2",
+              "attempt": 2,
+              "status": 200
+            }
+          ],
+          "waits": [
+            {
+              "token": "start",
+              "after_attempt": 1,
+              "seconds": 5
+            },
+            {
+              "token": "p2",
+              "after_attempt": 1,
+              "seconds": 2
+            }
+          ],
+          "outcome": "complete"
+        },
+        "explanation": [
+          "start attempt 1 has Retry-After 7; the max-delay cap reduces its simulated wait to 5 seconds. Attempt 2 adds a and b.",
+          "p2 starts a new retry budget. Its first failure waits base_delay=2, then succeeds.",
+          "The repeated b keeps its original value 20; c is appended. A null next token completes the walk."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-exhaust",
+        "name": "Stop after exactly the allowed extra attempts",
+        "input": {
+          "start_token": "s",
+          "max_retries": 1,
+          "base_delay": 2,
+          "max_delay": 9,
+          "responses": {
+            "s": [
+              {
+                "status": 503
+              },
+              {
+                "status": 503
+              },
+              {
+                "status": 200,
+                "items": [],
+                "next_token": null
+              }
+            ]
+          }
+        },
+        "expected": {
+          "items": [],
+          "requests": [
+            {
+              "token": "s",
+              "attempt": 1,
+              "status": 503
+            },
+            {
+              "token": "s",
+              "attempt": 2,
+              "status": 503
+            }
+          ],
+          "waits": [
+            {
+              "token": "s",
+              "after_attempt": 1,
+              "seconds": 2
+            }
+          ],
+          "outcome": "http_503"
+        },
+        "explanation": [
+          "One retry allows two total requests. Only one wait is logged, and the scripted third success is never reached."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-cycle",
+        "name": "A self-referencing successful cursor",
+        "input": {
+          "start_token": "s",
+          "max_retries": 0,
+          "base_delay": 1,
+          "max_delay": 3,
+          "responses": {
+            "s": [
+              {
+                "status": 200,
+                "items": [
+                  {
+                    "id": "z",
+                    "value": null
+                  },
+                  {
+                    "id": "z",
+                    "value": 3
+                  }
+                ],
+                "next_token": "s"
+              }
+            ]
+          }
+        },
+        "expected": {
+          "items": [
+            {
+              "id": "z",
+              "value": null
+            }
+          ],
+          "requests": [
+            {
+              "token": "s",
+              "attempt": 1,
+              "status": 200
+            }
+          ],
+          "waits": [],
+          "outcome": "cursor_cycle"
+        },
+        "explanation": [
+          "The first z wins even though its value is null. The next token is the completed current token, so traversal stops before issuing another request."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-missing",
+        "name": "Keep partial results when a script is missing",
+        "input": {
+          "start_token": "s",
+          "max_retries": 2,
+          "base_delay": 1,
+          "max_delay": 4,
+          "responses": {
+            "s": [
+              {
+                "status": 200,
+                "items": [
+                  {
+                    "id": "a",
+                    "value": 1
+                  }
+                ],
+                "next_token": "lost"
+              }
+            ]
+          }
+        },
+        "expected": {
+          "items": [
+            {
+              "id": "a",
+              "value": 1
+            }
+          ],
+          "requests": [
+            {
+              "token": "s",
+              "attempt": 1,
+              "status": 200
+            }
+          ],
+          "waits": [],
+          "outcome": "missing_response"
+        },
+        "explanation": [
+          "s succeeds and contributes a. No scripted response exists for lost; retain a and do not log a request that never occurred."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-backoff",
+        "name": "Exponential backoff and a non-retryable error",
+        "input": {
+          "start_token": "s",
+          "max_retries": 3,
+          "base_delay": 2,
+          "max_delay": 5,
+          "responses": {
+            "s": [
+              {
+                "status": 503
+              },
+              {
+                "status": 429,
+                "retry_after": 1
+              },
+              {
+                "status": 503
+              },
+              {
+                "status": 400
+              }
+            ]
+          }
+        },
+        "expected": {
+          "items": [],
+          "requests": [
+            {
+              "token": "s",
+              "attempt": 1,
+              "status": 503
+            },
+            {
+              "token": "s",
+              "attempt": 2,
+              "status": 429
+            },
+            {
+              "token": "s",
+              "attempt": 3,
+              "status": 503
+            },
+            {
+              "token": "s",
+              "attempt": 4,
+              "status": 400
+            }
+          ],
+          "waits": [
+            {
+              "token": "s",
+              "after_attempt": 1,
+              "seconds": 2
+            },
+            {
+              "token": "s",
+              "after_attempt": 2,
+              "seconds": 4
+            },
+            {
+              "token": "s",
+              "after_attempt": 3,
+              "seconds": 5
+            }
+          ],
+          "outcome": "http_400"
+        },
+        "explanation": [
+          "Backoff grows 2, 4, 8 and is capped to 2, 4, 5. Retry-After 1 does not shorten the second wait. The final 400 is terminal."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-no-retry",
+        "name": "Non-retryable status stops immediately",
+        "input": {
+          "start_token": "s",
+          "max_retries": 3,
+          "base_delay": 1,
+          "max_delay": 8,
+          "responses": {
+            "s": [
+              {
+                "status": 401
+              },
+              {
+                "status": 200,
+                "items": [
+                  {
+                    "id": "x",
+                    "value": 1
+                  }
+                ],
+                "next_token": null
+              }
+            ]
+          }
+        },
+        "expected": {
+          "items": [],
+          "requests": [
+            {
+              "token": "s",
+              "attempt": 1,
+              "status": 401
+            }
+          ],
+          "waits": [],
+          "outcome": "http_401"
+        },
+        "explanation": [
+          "A 401 is not retryable. Stop after the first request even with three retries available; never consume the scripted success."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-multi-cycle",
+        "name": "Detect a cursor cycle longer than one page",
+        "input": {
+          "start_token": "s",
+          "max_retries": 0,
+          "base_delay": 1,
+          "max_delay": 2,
+          "responses": {
+            "s": [
+              {
+                "status": 200,
+                "items": [
+                  {
+                    "id": "a",
+                    "value": 1
+                  }
+                ],
+                "next_token": "p"
+              }
+            ],
+            "p": [
+              {
+                "status": 200,
+                "items": [
+                  {
+                    "id": "b",
+                    "value": 2
+                  }
+                ],
+                "next_token": "s"
+              }
+            ]
+          }
+        },
+        "expected": {
+          "items": [
+            {
+              "id": "a",
+              "value": 1
+            },
+            {
+              "id": "b",
+              "value": 2
+            }
+          ],
+          "requests": [
+            {
+              "token": "s",
+              "attempt": 1,
+              "status": 200
+            },
+            {
+              "token": "p",
+              "attempt": 1,
+              "status": 200
+            }
+          ],
+          "waits": [],
+          "outcome": "cursor_cycle"
+        },
+        "explanation": [
+          "s and p both succeed and contribute one record. p points back to the previously completed s, so stop without requesting s again."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "Treat successful page progression and retry attempts as separate loops; the retry counter belongs to one cursor.",
+      "Use one set for successfully visited tokens and another for record IDs. These protect against two different kinds of duplication.",
+      "On a failed response, decide whether another attempt is allowed before appending a wait. On success, collect records before checking the next cursor."
+    ],
+    "explanation": [
+      "Initialize ordered trace lists and membership sets. There is no dependency on wall-clock time.",
+      "For each cursor, consume the response at attempt - 1. Log only responses that actually exist.",
+      "For retryable errors, compare the current attempt to the retry budget, then apply exponential backoff, the Retry-After floor, and the maximum cap.",
+      "For successful pages, keep the first object for each ID, mark the cursor successful, and check completion/cycle before advancing.",
+      "Return immediately on every terminal state, preserving partial successful work and the exact trace."
+    ],
+    "complexity": "O(A + R) expected time for A attempted responses and R record objects processed; O(U + P + A) space for U unique records, P successful cursors, and traces.",
+    "limitations": [
+      "This is a deterministic control-flow model, not a live HTTP client. Production clients also need timeouts, jitter, cancellation, authentication, and durable checkpoints.",
+      "The cap on Retry-After is an explicit exercise policy; real services may require honoring it without a cap."
+    ],
+    "followUp": "How would you resume safely after a process crash between writing one page’s records and saving its cursor?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: retry all failed status codes",
+        "code": "def solve(data):\n    result = {\"items\": [], \"requests\": [], \"waits\": [], \"outcome\": None}\n    seen_ids, completed_tokens = set(), set()\n    token = data[\"start_token\"]\n    while True:\n        script = data[\"responses\"].get(token, [])\n        for attempt in range(1, data[\"max_retries\"] + 2):\n            if attempt > len(script):\n                result[\"outcome\"] = \"missing_response\"\n                return result\n            response = script[attempt - 1]\n            status = response[\"status\"]\n            result[\"requests\"].append({\"token\": token, \"attempt\": attempt, \"status\": status})\n            if status == 200:\n                for item in response[\"items\"]:\n                    if item[\"id\"] not in seen_ids:\n                        seen_ids.add(item[\"id\"])\n                        result[\"items\"].append(dict(item))\n                completed_tokens.add(token)\n                next_token = response[\"next_token\"]\n                if next_token is None:\n                    result[\"outcome\"] = \"complete\"\n                    return result\n                if next_token in completed_tokens:\n                    result[\"outcome\"] = \"cursor_cycle\"\n                    return result\n                token = next_token\n                break\n            if attempt > data[\"max_retries\"]:\n                result[\"outcome\"] = f\"http_{status}\"\n                return result\n            delay = min(data[\"max_delay\"], max(data[\"base_delay\"] * 2 ** (attempt - 1), response.get(\"retry_after\", 0)))\n            result[\"waits\"].append({\"token\": token, \"after_attempt\": attempt, \"seconds\": delay})\n"
+      },
+      {
+        "label": "Wrong: forget earlier cursors when checking cycles",
+        "code": "def solve(data):\n    result = {\"items\": [], \"requests\": [], \"waits\": [], \"outcome\": None}\n    seen_ids, completed_tokens = set(), set()\n    token = data[\"start_token\"]\n    while True:\n        script = data[\"responses\"].get(token, [])\n        for attempt in range(1, data[\"max_retries\"] + 2):\n            if attempt > len(script):\n                result[\"outcome\"] = \"missing_response\"\n                return result\n            response = script[attempt - 1]\n            status = response[\"status\"]\n            result[\"requests\"].append({\"token\": token, \"attempt\": attempt, \"status\": status})\n            if status == 200:\n                for item in response[\"items\"]:\n                    if item[\"id\"] not in seen_ids:\n                        seen_ids.add(item[\"id\"])\n                        result[\"items\"].append(dict(item))\n                completed_tokens.add(token)\n                next_token = response[\"next_token\"]\n                if next_token is None:\n                    result[\"outcome\"] = \"complete\"\n                    return result\n                if next_token == token:\n                    result[\"outcome\"] = \"cursor_cycle\"\n                    return result\n                token = next_token\n                break\n            if status not in (429, 503) or attempt > data[\"max_retries\"]:\n                result[\"outcome\"] = f\"http_{status}\"\n                return result\n            delay = min(data[\"max_delay\"], max(data[\"base_delay\"] * 2 ** (attempt - 1), response.get(\"retry_after\", 0)))\n            result[\"waits\"].append({\"token\": token, \"after_attempt\": attempt, \"seconds\": delay})\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q04",
+    "title": "Deduplicate with a moving watermark",
+    "topic": "Streaming · bounded state · event time",
+    "difficulty": "Advanced",
+    "summary": "Handle late events, scoped IDs, and exact TTL boundaries without refreshing duplicates.",
+    "prompt": "A stream consumer cannot keep every event ID forever. Process arrival-ordered events using an event-time watermark and a bounded deduplication cache. Report every decision and the state left at the end.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input: events in arrival order, each {tenant: string, id: string, ts: integer UTC epoch second}; allowed_lateness and retention are nonnegative integer seconds, with retention strictly positive. There are no null timestamps or IDs.",
+        "Before classifying every event, update max_seen to the maximum timestamp observed so far, then watermark = max_seen - allowed_lateness. Even rejected arrivals participate in max_seen.",
+        "Next expire cache entries whose accepted event timestamp is <= watermark - retention. Expiration at exact equality is intentional.",
+        "If the incoming timestamp is < watermark, classify its zero-based index as late. Equality to the watermark is on time. A late event must never change deduplication state.",
+        "For an on-time event, key by (tenant, id). If that key is still cached, classify as duplicate and DO NOT refresh its cached timestamp. Otherwise accept it and cache its timestamp.",
+        "Return accepted_indices, duplicate_indices, and late_indices in arrival order; watermark (null for no arrivals); and retained as [{tenant,id,ts}] sorted by tenant then id. Retained timestamps are from accepted events only. Integer seconds require no rounding.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # Update watermark -> expire -> classify late/duplicate/accepted.\n    return {\"accepted_indices\": [], \"duplicate_indices\": [], \"late_indices\": [], \"watermark\": None, \"retained\": []}\n",
+    "solutionCode": "import heapq\n\ndef solve(data):\n    result = {\"accepted_indices\": [], \"duplicate_indices\": [], \"late_indices\": [], \"watermark\": None, \"retained\": []}\n    cache, expiry_heap = {}, []\n    max_seen = None\n    for index, event in enumerate(data[\"events\"]):\n        ts = event[\"ts\"]\n        max_seen = ts if max_seen is None else max(max_seen, ts)\n        watermark = max_seen - data[\"allowed_lateness\"]\n        result[\"watermark\"] = watermark\n        cutoff = watermark - data[\"retention\"]\n        while expiry_heap and expiry_heap[0][0] <= cutoff:\n            accepted_ts, tenant, event_id = heapq.heappop(expiry_heap)\n            key = (tenant, event_id)\n            if cache.get(key) == accepted_ts:\n                del cache[key]\n        key = (event[\"tenant\"], event[\"id\"])\n        if ts < watermark:\n            result[\"late_indices\"].append(index)\n        elif key in cache:\n            result[\"duplicate_indices\"].append(index)\n        else:\n            result[\"accepted_indices\"].append(index)\n            cache[key] = ts\n            heapq.heappush(expiry_heap, (ts, key[0], key[1]))\n    result[\"retained\"] = [{\"tenant\": tenant, \"id\": event_id, \"ts\": cache[(tenant, event_id)]} for tenant, event_id in sorted(cache)]\n    return result\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Expiration, late arrival, and non-refreshing duplicates",
+        "input": {
+          "allowed_lateness": 3,
+          "retention": 5,
+          "events": [
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 10
+            },
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 12
+            },
+            {
+              "tenant": "t",
+              "id": "b",
+              "ts": 18
+            },
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 16
+            },
+            {
+              "tenant": "t",
+              "id": "c",
+              "ts": 14
+            },
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 20
+            },
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 24
+            }
+          ]
+        },
+        "expected": {
+          "accepted_indices": [
+            0,
+            2,
+            3,
+            6
+          ],
+          "duplicate_indices": [
+            1,
+            5
+          ],
+          "late_indices": [
+            4
+          ],
+          "watermark": 21,
+          "retained": [
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 24
+            },
+            {
+              "tenant": "t",
+              "id": "b",
+              "ts": 18
+            }
+          ]
+        },
+        "explanation": [
+          "Index 0 accepts a@10. Index 1 is duplicate at watermark 9, so a remains cached at 10.",
+          "Index 2 advances the watermark to 15. The cutoff is 10, expiring a@10 exactly; b@18 is accepted.",
+          "Index 3 accepts a@16. Index 4 has timestamp 14 < watermark 15, so it is late.",
+          "Index 5 is duplicate and does not refresh a@16. Index 6 moves the watermark to 21, expires a@16 at cutoff 16, then accepts a@24.",
+          "The final cache contains a@24 and b@18; final watermark is 24 - 3 = 21."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-scope",
+        "name": "Tenant scope and equality to the watermark",
+        "input": {
+          "allowed_lateness": 2,
+          "retention": 4,
+          "events": [
+            {
+              "tenant": "a",
+              "id": "x",
+              "ts": 10
+            },
+            {
+              "tenant": "b",
+              "id": "x",
+              "ts": 10
+            },
+            {
+              "tenant": "a",
+              "id": "y",
+              "ts": 8
+            },
+            {
+              "tenant": "a",
+              "id": "z",
+              "ts": 7
+            }
+          ]
+        },
+        "expected": {
+          "accepted_indices": [
+            0,
+            1,
+            2
+          ],
+          "duplicate_indices": [],
+          "late_indices": [
+            3
+          ],
+          "watermark": 8,
+          "retained": [
+            {
+              "tenant": "a",
+              "id": "x",
+              "ts": 10
+            },
+            {
+              "tenant": "a",
+              "id": "y",
+              "ts": 8
+            },
+            {
+              "tenant": "b",
+              "id": "x",
+              "ts": 10
+            }
+          ]
+        },
+        "explanation": [
+          "The two x IDs belong to different tenants, so both are accepted. y@8 equals the watermark and is accepted; z@7 is late."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-exact-ttl",
+        "name": "Exact expiration before duplicate classification",
+        "input": {
+          "allowed_lateness": 0,
+          "retention": 5,
+          "events": [
+            {
+              "tenant": "t",
+              "id": "x",
+              "ts": 0
+            },
+            {
+              "tenant": "t",
+              "id": "x",
+              "ts": 5
+            },
+            {
+              "tenant": "t",
+              "id": "x",
+              "ts": 4
+            }
+          ]
+        },
+        "expected": {
+          "accepted_indices": [
+            0,
+            1
+          ],
+          "duplicate_indices": [],
+          "late_indices": [
+            2
+          ],
+          "watermark": 5,
+          "retained": [
+            {
+              "tenant": "t",
+              "id": "x",
+              "ts": 5
+            }
+          ]
+        },
+        "explanation": [
+          "At index 1, the cache cutoff is 0 and x@0 expires before lookup, so x@5 is accepted. At index 2, timestamp 4 is late; classify it as late even though x is cached."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-empty",
+        "name": "No events means no watermark",
+        "input": {
+          "allowed_lateness": 0,
+          "retention": 1,
+          "events": []
+        },
+        "expected": {
+          "accepted_indices": [],
+          "duplicate_indices": [],
+          "late_indices": [],
+          "watermark": null,
+          "retained": []
+        },
+        "explanation": [
+          "No timestamp has been observed, so the watermark is null, not zero."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-duplicate-watermark",
+        "name": "Duplicates still advance observed event time",
+        "input": {
+          "allowed_lateness": 3,
+          "retention": 10,
+          "events": [
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 10
+            },
+            {
+              "tenant": "t",
+              "id": "b",
+              "ts": 11
+            },
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 20
+            },
+            {
+              "tenant": "t",
+              "id": "c",
+              "ts": 16
+            }
+          ]
+        },
+        "expected": {
+          "accepted_indices": [
+            0,
+            1
+          ],
+          "duplicate_indices": [
+            2
+          ],
+          "late_indices": [
+            3
+          ],
+          "watermark": 17,
+          "retained": [
+            {
+              "tenant": "t",
+              "id": "a",
+              "ts": 10
+            },
+            {
+              "tenant": "t",
+              "id": "b",
+              "ts": 11
+            }
+          ]
+        },
+        "explanation": [
+          "a@20 is a duplicate but still moves max_seen to 20 and the watermark to 17. Therefore c@16 is late.",
+          "The cache cutoff is 7, so the accepted a@10 and b@11 remain. The duplicate does not replace a’s cached timestamp."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "Write the processing order down before choosing data structures. Expiration precedes both late and duplicate classification.",
+      "Use (tenant, id) for membership, and store the timestamp of the accepted event. Duplicates are observations, not cache refreshes.",
+      "A min-heap of accepted timestamps lets you expire only entries that cross the cutoff. Pair it with a dictionary for fast membership and sorted final output."
+    ],
+    "explanation": [
+      "Compute the new watermark from the greatest timestamp observed, never from arrival count or current time.",
+      "Pop expiry-heap entries at or below the inclusive cutoff and remove their corresponding cached keys.",
+      "Apply the strict late predicate first. This ensures a late repeat is counted as late rather than duplicate.",
+      "For on-time arrivals, use tenant-scoped membership; accept absent keys, but never alter a duplicate’s timestamp.",
+      "Sort only the final retained cache. Decision-index lists stay in input order, making the baseline trace directly auditable."
+    ],
+    "complexity": "O(N log B + B log B) time for N events and up to B retained keys; O(B + N) space including required decision-index output. The dedup state itself is O(B).",
+    "limitations": [
+      "The time horizon bounds cache age, not key cardinality: unlimited unique IDs within the horizon can still exhaust memory.",
+      "This watermark policy is global. Partitioned streams may need per-partition watermarks and a policy for idle partitions."
+    ],
+    "followUp": "What can and cannot be guaranteed about exactly-once processing after IDs expire, especially when producers reuse IDs?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: expire strictly before the cutoff, not at equality",
+        "code": "import heapq\n\ndef solve(data):\n    result = {\"accepted_indices\": [], \"duplicate_indices\": [], \"late_indices\": [], \"watermark\": None, \"retained\": []}\n    cache, expiry_heap = {}, []\n    max_seen = None\n    for index, event in enumerate(data[\"events\"]):\n        ts = event[\"ts\"]\n        max_seen = ts if max_seen is None else max(max_seen, ts)\n        watermark = max_seen - data[\"allowed_lateness\"]\n        result[\"watermark\"] = watermark\n        cutoff = watermark - data[\"retention\"]\n        while expiry_heap and expiry_heap[0][0] < cutoff:\n            accepted_ts, tenant, event_id = heapq.heappop(expiry_heap)\n            key = (tenant, event_id)\n            if cache.get(key) == accepted_ts:\n                del cache[key]\n        key = (event[\"tenant\"], event[\"id\"])\n        if ts < watermark:\n            result[\"late_indices\"].append(index)\n        elif key in cache:\n            result[\"duplicate_indices\"].append(index)\n        else:\n            result[\"accepted_indices\"].append(index)\n            cache[key] = ts\n            heapq.heappush(expiry_heap, (ts, key[0], key[1]))\n    result[\"retained\"] = [{\"tenant\": tenant, \"id\": event_id, \"ts\": cache[(tenant, event_id)]} for tenant, event_id in sorted(cache)]\n    return result\n"
+      },
+      {
+        "label": "Wrong: reject events exactly on the watermark",
+        "code": "import heapq\n\ndef solve(data):\n    result = {\"accepted_indices\": [], \"duplicate_indices\": [], \"late_indices\": [], \"watermark\": None, \"retained\": []}\n    cache, expiry_heap = {}, []\n    max_seen = None\n    for index, event in enumerate(data[\"events\"]):\n        ts = event[\"ts\"]\n        max_seen = ts if max_seen is None else max(max_seen, ts)\n        watermark = max_seen - data[\"allowed_lateness\"]\n        result[\"watermark\"] = watermark\n        cutoff = watermark - data[\"retention\"]\n        while expiry_heap and expiry_heap[0][0] <= cutoff:\n            accepted_ts, tenant, event_id = heapq.heappop(expiry_heap)\n            key = (tenant, event_id)\n            if cache.get(key) == accepted_ts:\n                del cache[key]\n        key = (event[\"tenant\"], event[\"id\"])\n        if ts <= watermark:\n            result[\"late_indices\"].append(index)\n        elif key in cache:\n            result[\"duplicate_indices\"].append(index)\n        else:\n            result[\"accepted_indices\"].append(index)\n            cache[key] = ts\n            heapq.heappush(expiry_heap, (ts, key[0], key[1]))\n    result[\"retained\"] = [{\"tenant\": tenant, \"id\": event_id, \"ts\": cache[(tenant, event_id)]} for tenant, event_id in sorted(cache)]\n    return result\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q05",
+    "title": "Measure coverage without double-counting",
+    "topic": "Intervals · sweep line · half-open windows",
+    "difficulty": "Advanced",
+    "summary": "Clip overlapping jobs to reporting windows, then separate union coverage from total work.",
+    "prompt": "An infrastructure report overstates busy time because jobs overlap. For every resource and reporting window, compute wall-clock coverage, total job-seconds, and peak concurrency using half-open interval semantics.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input: resources is a list of unique string names. windows has unique string window_id with start/end offset-aware ISO 8601 timestamps. jobs has resource, start, and end (timestamp or null). All timestamps are whole seconds; every closed interval has end >= start and each window has end > start.",
+        "Interpret every interval as half-open [start,end) in UTC. A null job end means it is still running; for each window clip it to that window’s end. All job resources occur in resources.",
+        "For every (window, resource), clip jobs to the window. Discard empty intersections, including zero-length jobs and intervals that only touch a boundary.",
+        "covered_seconds is the length of the union of clipped intervals. job_seconds is the sum of clipped interval lengths, counting overlaps multiple times. peak_concurrency is the largest simultaneous count over a positive-length segment.",
+        "At a shared endpoint, ending jobs and starting jobs do not overlap: aggregate all endpoint deltas before the next segment. Equal timestamps are instants, not positive-duration peaks.",
+        "Return {\"rows\": [{window_id, resource, covered_seconds, job_seconds, peak_concurrency}]}, sorted by window_id then resource. Include zero rows for resources without overlap. Durations are exact integer seconds; no rounding or null duration output.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # For each window/resource, clip intervals and sweep endpoint changes.\n    return {\"rows\": []}\n",
+    "solutionCode": "from datetime import datetime, timezone\nfrom collections import defaultdict\n\ndef solve(data):\n    def parse(value):\n        return datetime.fromisoformat(value.replace(\"Z\", \"+00:00\")).astimezone(timezone.utc)\n    jobs = [(j[\"resource\"], parse(j[\"start\"]), None if j[\"end\"] is None else parse(j[\"end\"])) for j in data[\"jobs\"]]\n    rows = []\n    for window in sorted(data[\"windows\"], key=lambda w: w[\"window_id\"]):\n        ws, we = parse(window[\"start\"]), parse(window[\"end\"])\n        for resource in sorted(data[\"resources\"]):\n            changes = defaultdict(int)\n            job_seconds = 0\n            for name, start, end in jobs:\n                if name != resource:\n                    continue\n                left, right = max(start, ws), min(end if end is not None else we, we)\n                if left < right:\n                    job_seconds += int((right - left).total_seconds())\n                    changes[left] += 1\n                    changes[right] -= 1\n            active = covered = peak = 0\n            previous = None\n            for point in sorted(changes):\n                if previous is not None and point > previous and active > 0:\n                    covered += int((point - previous).total_seconds())\n                    peak = max(peak, active)\n                active += changes[point]\n                previous = point\n            rows.append({\"window_id\": window[\"window_id\"], \"resource\": resource, \"covered_seconds\": covered, \"job_seconds\": job_seconds, \"peak_concurrency\": peak})\n    return {\"rows\": rows}\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Overlapping, adjacent, and still-running jobs",
+        "input": {
+          "resources": [
+            "b",
+            "a"
+          ],
+          "windows": [
+            {
+              "window_id": "w1",
+              "start": "2026-01-01T00:00:00Z",
+              "end": "2026-01-01T00:00:10Z"
+            }
+          ],
+          "jobs": [
+            {
+              "resource": "a",
+              "start": "2025-12-31T23:59:58Z",
+              "end": "2026-01-01T00:00:04Z"
+            },
+            {
+              "resource": "a",
+              "start": "2026-01-01T00:00:02Z",
+              "end": "2026-01-01T00:00:06Z"
+            },
+            {
+              "resource": "a",
+              "start": "2026-01-01T00:00:06Z",
+              "end": null
+            },
+            {
+              "resource": "b",
+              "start": "2026-01-01T00:00:10Z",
+              "end": null
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "window_id": "w1",
+              "resource": "a",
+              "covered_seconds": 10,
+              "job_seconds": 12,
+              "peak_concurrency": 2
+            },
+            {
+              "window_id": "w1",
+              "resource": "b",
+              "covered_seconds": 0,
+              "job_seconds": 0,
+              "peak_concurrency": 0
+            }
+          ]
+        },
+        "explanation": [
+          "For a, clipped intervals are [0,4), [2,6), and [6,10). Their lengths sum to 4+4+4=12 job-seconds.",
+          "The union covers [0,10) continuously, so covered_seconds=10. Only [2,4) has two active jobs; peak is 2.",
+          "At second 6 one job ends as the running job starts; they do not overlap. b starts exactly at the window end and contributes zero."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-touch",
+        "name": "Touching endpoints never increase concurrency",
+        "input": {
+          "resources": [
+            "r"
+          ],
+          "windows": [
+            {
+              "window_id": "x",
+              "start": "2026-01-01T00:00:00Z",
+              "end": "2026-01-01T00:00:04Z"
+            }
+          ],
+          "jobs": [
+            {
+              "resource": "r",
+              "start": "2026-01-01T00:00:00Z",
+              "end": "2026-01-01T00:00:02Z"
+            },
+            {
+              "resource": "r",
+              "start": "2026-01-01T00:00:02Z",
+              "end": "2026-01-01T00:00:04Z"
+            },
+            {
+              "resource": "r",
+              "start": "2026-01-01T00:00:02Z",
+              "end": "2026-01-01T00:00:02Z"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "window_id": "x",
+              "resource": "r",
+              "covered_seconds": 4,
+              "job_seconds": 4,
+              "peak_concurrency": 1
+            }
+          ]
+        },
+        "explanation": [
+          "Two adjacent jobs cover four seconds with no gap and no overlap. The zero-length job contributes neither duration nor a concurrency peak."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-offset",
+        "name": "UTC normalization and independent windows",
+        "input": {
+          "resources": [
+            "r",
+            "idle"
+          ],
+          "windows": [
+            {
+              "window_id": "b",
+              "start": "2026-01-01T00:00:10Z",
+              "end": "2026-01-01T00:00:20Z"
+            },
+            {
+              "window_id": "a",
+              "start": "2026-01-01T01:00:00+01:00",
+              "end": "2026-01-01T01:00:10+01:00"
+            }
+          ],
+          "jobs": [
+            {
+              "resource": "r",
+              "start": "2026-01-01T02:00:05+02:00",
+              "end": "2026-01-01T00:00:15Z"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "window_id": "a",
+              "resource": "idle",
+              "covered_seconds": 0,
+              "job_seconds": 0,
+              "peak_concurrency": 0
+            },
+            {
+              "window_id": "a",
+              "resource": "r",
+              "covered_seconds": 5,
+              "job_seconds": 5,
+              "peak_concurrency": 1
+            },
+            {
+              "window_id": "b",
+              "resource": "idle",
+              "covered_seconds": 0,
+              "job_seconds": 0,
+              "peak_concurrency": 0
+            },
+            {
+              "window_id": "b",
+              "resource": "r",
+              "covered_seconds": 5,
+              "job_seconds": 5,
+              "peak_concurrency": 1
+            }
+          ]
+        },
+        "explanation": [
+          "The job is 00:00:05–00:00:15 UTC. It contributes five seconds to each window.",
+          "Sort windows by ID a then b and resources idle then r. Include idle’s zero row for each window."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-nested",
+        "name": "Nested and spanning intervals",
+        "input": {
+          "resources": [
+            "r"
+          ],
+          "windows": [
+            {
+              "window_id": "w",
+              "start": "2026-01-01T00:00:00Z",
+              "end": "2026-01-01T00:00:10Z"
+            }
+          ],
+          "jobs": [
+            {
+              "resource": "r",
+              "start": "2026-01-01T00:00:00Z",
+              "end": "2026-01-01T00:00:08Z"
+            },
+            {
+              "resource": "r",
+              "start": "2026-01-01T00:00:02Z",
+              "end": "2026-01-01T00:00:03Z"
+            },
+            {
+              "resource": "r",
+              "start": "2026-01-01T00:00:05Z",
+              "end": "2026-01-01T00:00:10Z"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "window_id": "w",
+              "resource": "r",
+              "covered_seconds": 10,
+              "job_seconds": 14,
+              "peak_concurrency": 2
+            }
+          ]
+        },
+        "explanation": [
+          "Intervals [0,8), [2,3), and [5,10) have lengths 8,1,5, totaling 14 job-seconds.",
+          "Their union spans all 10 seconds. The nested and spanning overlaps happen at different times; peak concurrency is 2, not 3."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "Convert all timestamps to aware UTC values first. Clip before doing any aggregation.",
+      "The union length and the sum of interval lengths answer different questions. Keep separate accumulators.",
+      "Aggregate +1 and -1 deltas at each endpoint. During a sweep, the active count describes the segment between the previous point and the current point."
+    ],
+    "explanation": [
+      "Parse timestamps once for jobs, preserving an open-ended marker for null ends.",
+      "For each reporting pair, compute max(job_start, window_start) and min(job_end or window_end, window_end). Reject nonpositive intersections.",
+      "Add clipped lengths directly to job_seconds and record endpoint deltas for the sweep.",
+      "For each positive-length segment, add its duration to covered_seconds only if active is positive; update the peak from that active count.",
+      "Apply all deltas at a point together. This avoids inventing a momentary peak when one job hands off to another."
+    ],
+    "complexity": "For W windows, R resources, and J jobs: O(W·R·J + sum(K log K)) time, K clipped intervals per pair; O(J + max K + W·R) space including output. Grouping jobs by resource removes the repeated unrelated scans.",
+    "limitations": [
+      "The straightforward reference favors clarity over large-scale indexing. Large overlapping window sets may need interval indexes or a reusable global sweep.",
+      "Only whole-second timestamps are allowed. Fractional-second reporting would need an explicit output precision policy."
+    ],
+    "followUp": "How would you compute the 95th percentile of concurrency weighted by time, rather than by sampled endpoint count?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: sum job durations instead of union coverage",
+        "code": "from datetime import datetime, timezone\nfrom collections import defaultdict\n\ndef solve(data):\n    def parse(value):\n        return datetime.fromisoformat(value.replace(\"Z\", \"+00:00\")).astimezone(timezone.utc)\n    jobs = [(j[\"resource\"], parse(j[\"start\"]), None if j[\"end\"] is None else parse(j[\"end\"])) for j in data[\"jobs\"]]\n    rows = []\n    for window in sorted(data[\"windows\"], key=lambda w: w[\"window_id\"]):\n        ws, we = parse(window[\"start\"]), parse(window[\"end\"])\n        for resource in sorted(data[\"resources\"]):\n            changes = defaultdict(int)\n            job_seconds = 0\n            for name, start, end in jobs:\n                if name != resource:\n                    continue\n                left, right = max(start, ws), min(end if end is not None else we, we)\n                if left < right:\n                    job_seconds += int((right - left).total_seconds())\n                    changes[left] += 1\n                    changes[right] -= 1\n            active = covered = peak = 0\n            previous = None\n            for point in sorted(changes):\n                if previous is not None and point > previous and active > 0:\n                    covered += int((point - previous).total_seconds())\n                    peak = max(peak, active)\n                active += changes[point]\n                previous = point\n            rows.append({\"window_id\": window[\"window_id\"], \"resource\": resource, \"covered_seconds\": job_seconds, \"job_seconds\": job_seconds, \"peak_concurrency\": peak})\n    return {\"rows\": rows}\n"
+      },
+      {
+        "label": "Wrong: estimate peak from endpoint count",
+        "code": "from datetime import datetime, timezone\nfrom collections import defaultdict\n\ndef solve(data):\n    def parse(value):\n        return datetime.fromisoformat(value.replace(\"Z\", \"+00:00\")).astimezone(timezone.utc)\n    jobs = [(j[\"resource\"], parse(j[\"start\"]), None if j[\"end\"] is None else parse(j[\"end\"])) for j in data[\"jobs\"]]\n    rows = []\n    for window in sorted(data[\"windows\"], key=lambda w: w[\"window_id\"]):\n        ws, we = parse(window[\"start\"]), parse(window[\"end\"])\n        for resource in sorted(data[\"resources\"]):\n            changes = defaultdict(int)\n            job_seconds = 0\n            for name, start, end in jobs:\n                if name != resource:\n                    continue\n                left, right = max(start, ws), min(end if end is not None else we, we)\n                if left < right:\n                    job_seconds += int((right - left).total_seconds())\n                    changes[left] += 1\n                    changes[right] -= 1\n            active = covered = peak = 0\n            previous = None\n            for point in sorted(changes):\n                if previous is not None and point > previous and active > 0:\n                    covered += int((point - previous).total_seconds())\n                    peak = max(peak, active)\n                active += changes[point]\n                previous = point\n            rows.append({\"window_id\": window[\"window_id\"], \"resource\": resource, \"covered_seconds\": covered, \"job_seconds\": job_seconds, \"peak_concurrency\": len(changes) // 2})\n    return {\"rows\": rows}\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q06",
+    "title": "Replay patches and tombstones safely",
+    "topic": "CDC · replay · version ordering",
+    "difficulty": "Advanced",
+    "summary": "Rebuild entity state without reviving deleted records or confusing null with deletion.",
+    "prompt": "A CDC topic contains out-of-order full inserts, partial updates, and deletes. Reconstruct the current entity table using per-entity versions, and preserve tombstones so old events cannot resurrect deleted rows.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input events are in arrival order, each with string key, nonnegative integer version, op (upsert, patch, delete), and fields for upsert/patch (a JSON object whose values are scalar strings, integers, booleans, or null). key/version/op are not field names inside fields.",
+        "For each key, apply an event only if its version is strictly greater than the greatest previously applied version. Equal versions are ignored: first arrival wins. An ignored event never changes fields or version.",
+        "upsert fully replaces fields and marks the entity live. patch applies only to a currently live entity: it overwrites keys present in fields, preserves absent keys, and treats explicit null as a stored value.",
+        "A patch for a missing or deleted entity is rejected and does NOT advance its version. A later upsert may still be accepted if it exceeds the last applied version.",
+        "delete always establishes a tombstone at its version, including for a never-seen key; erase its fields. A higher-version upsert can recreate a deleted entity. A lower/equal-version upsert cannot.",
+        "Return {rows:[{key,version,fields}], tombstones:[{key,version}], ignored_indices:[...], rejected_patch_indices:[...]}. Rows and tombstones sort by key; index lists keep input order. No timestamps, timezones, rounding, or null keys/versions apply.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # Keep live data AND tombstone versions; version checks happen first.\n    return {\"rows\": [], \"tombstones\": [], \"ignored_indices\": [], \"rejected_patch_indices\": []}\n",
+    "solutionCode": "def solve(data):\n    state = {}\n    ignored, rejected = [], []\n    for index, event in enumerate(data[\"events\"]):\n        key, version, op = event[\"key\"], event[\"version\"], event[\"op\"]\n        previous = state.get(key)\n        if previous is not None and version <= previous[\"version\"]:\n            ignored.append(index)\n            continue\n        if op == \"patch\" and (previous is None or previous[\"deleted\"]):\n            rejected.append(index)\n            continue\n        if op == \"delete\":\n            state[key] = {\"version\": version, \"deleted\": True, \"fields\": {}}\n        elif op == \"upsert\":\n            state[key] = {\"version\": version, \"deleted\": False, \"fields\": dict(event[\"fields\"])}\n        else:\n            state[key] = {\"version\": version, \"deleted\": False, \"fields\": {**previous[\"fields\"], **event[\"fields\"]}}\n    rows, tombstones = [], []\n    for key in sorted(state):\n        entry = state[key]\n        if entry[\"deleted\"]:\n            tombstones.append({\"key\": key, \"version\": entry[\"version\"]})\n        else:\n            rows.append({\"key\": key, \"version\": entry[\"version\"], \"fields\": entry[\"fields\"]})\n    return {\"rows\": rows, \"tombstones\": tombstones, \"ignored_indices\": ignored, \"rejected_patch_indices\": rejected}\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Out-of-order updates and delete resurrection protection",
+        "input": {
+          "events": [
+            {
+              "key": "a",
+              "version": 2,
+              "op": "upsert",
+              "fields": {
+                "name": "Ada",
+                "city": "NY"
+              }
+            },
+            {
+              "key": "a",
+              "version": 4,
+              "op": "patch",
+              "fields": {
+                "city": null
+              }
+            },
+            {
+              "key": "a",
+              "version": 3,
+              "op": "upsert",
+              "fields": {
+                "name": "Old"
+              }
+            },
+            {
+              "key": "b",
+              "version": 5,
+              "op": "delete"
+            },
+            {
+              "key": "b",
+              "version": 4,
+              "op": "upsert",
+              "fields": {
+                "x": 1
+              }
+            },
+            {
+              "key": "b",
+              "version": 6,
+              "op": "patch",
+              "fields": {
+                "x": 2
+              }
+            },
+            {
+              "key": "b",
+              "version": 6,
+              "op": "upsert",
+              "fields": {
+                "x": 3
+              }
+            },
+            {
+              "key": "c",
+              "version": 1,
+              "op": "delete"
+            },
+            {
+              "key": "a",
+              "version": 4,
+              "op": "patch",
+              "fields": {
+                "name": "Overwrite"
+              }
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "key": "a",
+              "version": 4,
+              "fields": {
+                "name": "Ada",
+                "city": null
+              }
+            },
+            {
+              "key": "b",
+              "version": 6,
+              "fields": {
+                "x": 3
+              }
+            }
+          ],
+          "tombstones": [
+            {
+              "key": "c",
+              "version": 1
+            }
+          ],
+          "ignored_indices": [
+            2,
+            4,
+            8
+          ],
+          "rejected_patch_indices": [
+            5
+          ]
+        },
+        "explanation": [
+          "a v2 is created, then a v4 sets city to null while preserving name. The older v3 and equal-version final patch are ignored.",
+          "b v5 establishes a tombstone; v4 cannot resurrect it. A v6 patch is rejected because b is deleted, and does not consume version 6.",
+          "The following b v6 upsert therefore succeeds with x=3. c remains a v1 tombstone.",
+          "Ignored indices are 2, 4, 8; the invalid patch has its own rejected list containing 5."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-replace",
+        "name": "Upsert replaces; patch merges; equal version loses",
+        "input": {
+          "events": [
+            {
+              "key": "x",
+              "version": 0,
+              "op": "patch",
+              "fields": {
+                "a": 1
+              }
+            },
+            {
+              "key": "x",
+              "version": 0,
+              "op": "upsert",
+              "fields": {
+                "a": 1,
+                "b": 2
+              }
+            },
+            {
+              "key": "x",
+              "version": 1,
+              "op": "upsert",
+              "fields": {
+                "b": 3
+              }
+            },
+            {
+              "key": "x",
+              "version": 2,
+              "op": "patch",
+              "fields": {
+                "c": null
+              }
+            },
+            {
+              "key": "x",
+              "version": 2,
+              "op": "delete"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "key": "x",
+              "version": 2,
+              "fields": {
+                "b": 3,
+                "c": null
+              }
+            }
+          ],
+          "tombstones": [],
+          "ignored_indices": [
+            4
+          ],
+          "rejected_patch_indices": [
+            0
+          ]
+        },
+        "explanation": [
+          "The missing-entity patch does not reserve v0, so the next v0 upsert can create x.",
+          "The v1 full upsert removes a. The v2 patch adds c=null while preserving b. The equal-version delete loses to the earlier patch."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-tombstone",
+        "name": "Deletion removes fields but retains the version",
+        "input": {
+          "events": [
+            {
+              "key": "z",
+              "version": 1,
+              "op": "upsert",
+              "fields": {
+                "secret": "gone"
+              }
+            },
+            {
+              "key": "z",
+              "version": 3,
+              "op": "delete"
+            },
+            {
+              "key": "z",
+              "version": 2,
+              "op": "patch",
+              "fields": {
+                "secret": "old"
+              }
+            },
+            {
+              "key": "z",
+              "version": 4,
+              "op": "patch",
+              "fields": {
+                "secret": "new"
+              }
+            },
+            {
+              "key": "a",
+              "version": 0,
+              "op": "delete"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [],
+          "tombstones": [
+            {
+              "key": "a",
+              "version": 0
+            },
+            {
+              "key": "z",
+              "version": 3
+            }
+          ],
+          "ignored_indices": [
+            2
+          ],
+          "rejected_patch_indices": [
+            3
+          ]
+        },
+        "explanation": [
+          "z’s fields vanish at v3, but its version remains. The stale v2 patch is ignored before live-state checks; the fresh v4 patch is rejected and leaves tombstone v3 unchanged.",
+          "Deleting unseen a creates tombstone v0; tombstones sort a before z."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "Keep one state entry per key even after deletion. Forgetting tombstones lets stale data come back.",
+      "Check the version before checking whether a patch can apply. Ignored and rejected events are distinct outcomes.",
+      "Use a fresh dict for upsert; merge into a fresh dict for patch. Never use truthiness to decide whether a null patch value should be stored."
+    ],
+    "explanation": [
+      "Look up the current applied version. Reject older or equal versions into ignored_indices immediately.",
+      "For a newer patch, require a live row. A rejected patch has no state effect, including no version advancement.",
+      "Apply delete as a retained tombstone; apply upsert as full replacement; apply patch as a shallow key overwrite.",
+      "Keep null values in fields. Deletion is an event operation, not an interpretation of null.",
+      "Build sorted live rows and tombstones from the same versioned state. The baseline’s rejected b v6 patch makes room for its subsequent v6 upsert."
+    ],
+    "complexity": "O(E + K log K + F) time for E events, K keys, and F total field-copy work; O(K + live fields + E) space including audit-index output.",
+    "limitations": [
+      "Patches are shallow. Nested merge semantics, producer sequence gaps, and conflicting writers require additional contracts.",
+      "Tombstones are retained indefinitely here. Safe tombstone cleanup needs a replay horizon or upstream compaction guarantee."
+    ],
+    "followUp": "What information would you need to garbage-collect tombstones without permitting stale snapshots to resurrect deleted entities?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: equal-version events overwrite earlier arrivals",
+        "code": "def solve(data):\n    state = {}\n    ignored, rejected = [], []\n    for index, event in enumerate(data[\"events\"]):\n        key, version, op = event[\"key\"], event[\"version\"], event[\"op\"]\n        previous = state.get(key)\n        if previous is not None and version < previous[\"version\"]:\n            ignored.append(index)\n            continue\n        if op == \"patch\" and (previous is None or previous[\"deleted\"]):\n            rejected.append(index)\n            continue\n        if op == \"delete\":\n            state[key] = {\"version\": version, \"deleted\": True, \"fields\": {}}\n        elif op == \"upsert\":\n            state[key] = {\"version\": version, \"deleted\": False, \"fields\": dict(event[\"fields\"])}\n        else:\n            state[key] = {\"version\": version, \"deleted\": False, \"fields\": {**previous[\"fields\"], **event[\"fields\"]}}\n    rows, tombstones = [], []\n    for key in sorted(state):\n        entry = state[key]\n        if entry[\"deleted\"]:\n            tombstones.append({\"key\": key, \"version\": entry[\"version\"]})\n        else:\n            rows.append({\"key\": key, \"version\": entry[\"version\"], \"fields\": entry[\"fields\"]})\n    return {\"rows\": rows, \"tombstones\": tombstones, \"ignored_indices\": ignored, \"rejected_patch_indices\": rejected}\n"
+      },
+      {
+        "label": "Wrong: upserts merge instead of replacing fields",
+        "code": "def solve(data):\n    state = {}\n    ignored, rejected = [], []\n    for index, event in enumerate(data[\"events\"]):\n        key, version, op = event[\"key\"], event[\"version\"], event[\"op\"]\n        previous = state.get(key)\n        if previous is not None and version <= previous[\"version\"]:\n            ignored.append(index)\n            continue\n        if op == \"patch\" and (previous is None or previous[\"deleted\"]):\n            rejected.append(index)\n            continue\n        if op == \"delete\":\n            state[key] = {\"version\": version, \"deleted\": True, \"fields\": {}}\n        elif op == \"upsert\":\n            state[key] = {\"version\": version, \"deleted\": False, \"fields\": {**(previous[\"fields\"] if previous is not None else {}), **event[\"fields\"]}}\n        else:\n            state[key] = {\"version\": version, \"deleted\": False, \"fields\": {**previous[\"fields\"], **event[\"fields\"]}}\n    rows, tombstones = [], []\n    for key in sorted(state):\n        entry = state[key]\n        if entry[\"deleted\"]:\n            tombstones.append({\"key\": key, \"version\": entry[\"version\"]})\n        else:\n            rows.append({\"key\": key, \"version\": entry[\"version\"], \"fields\": entry[\"fields\"]})\n    return {\"rows\": rows, \"tombstones\": tombstones, \"ignored_indices\": ignored, \"rejected_patch_indices\": rejected}\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q07",
+    "title": "Schedule dependencies and isolate cycles",
+    "topic": "Graphs · topological order · SCCs",
+    "difficulty": "Advanced",
+    "summary": "Produce a deterministic runnable order and distinguish true cycles from downstream blockage.",
+    "prompt": "A pipeline scheduler must explain why work cannot run. Return the lexicographically smallest valid topological order for runnable tasks, identify actual cyclic components, and separately list tasks merely blocked downstream.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input tasks is a list of objects {id: unique non-empty string, requires: list of task IDs}. Every dependency is declared in tasks. Duplicate dependency IDs are one edge, not multiple edges; self-dependencies are allowed.",
+        "An edge dependency → task means the dependency must run first. Repeatedly choose the lexicographically smallest currently runnable task, including tasks that just became runnable. Return that execution sequence as order.",
+        "When no runnable tasks remain, find strongly connected components in the graph. A component is cyclic if it contains more than one task, or its single task depends on itself.",
+        "Return cycles as a list of sorted task-ID lists; sort that outer list lexicographically. blocked contains sorted unexecuted task IDs that are NOT members of a cyclic component.",
+        "Return {order: [...], cycles: [[...]], blocked: [...]}. Acyclic prerequisites of a cycle can still appear in order. Empty input returns three empty arrays. There are no null IDs, timestamps, timezones, numeric thresholds, or rounding.",
+        "The fixtures have at most 200 tasks, making a recursive SCC traversal safe for this exercise. Implementations for much deeper real graphs should avoid depending on recursion depth.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # Kahn + a min-heap gives deterministic runnable order.\n    # Strongly connected components distinguish cycles from blocked tasks.\n    return {\"order\": [], \"cycles\": [], \"blocked\": []}\n",
+    "solutionCode": "import heapq\n\ndef solve(data):\n    dependencies = {t[\"id\"]: set(t[\"requires\"]) for t in data[\"tasks\"]}\n    outgoing = {task: set() for task in dependencies}\n    for task, required in dependencies.items():\n        for dependency in required:\n            outgoing[dependency].add(task)\n    indegree = {task: len(required) for task, required in dependencies.items()}\n    ready = [task for task, degree in indegree.items() if degree == 0]\n    heapq.heapify(ready)\n    order = []\n    while ready:\n        task = heapq.heappop(ready)\n        order.append(task)\n        for target in outgoing[task]:\n            indegree[target] -= 1\n            if indegree[target] == 0:\n                heapq.heappush(ready, target)\n    index, lowlink, stack, on_stack, components = {}, {}, [], set(), []\n    def visit(node):\n        index[node] = lowlink[node] = len(index)\n        stack.append(node)\n        on_stack.add(node)\n        for target in sorted(outgoing[node]):\n            if target not in index:\n                visit(target)\n                lowlink[node] = min(lowlink[node], lowlink[target])\n            elif target in on_stack:\n                lowlink[node] = min(lowlink[node], index[target])\n        if lowlink[node] == index[node]:\n            component = []\n            while True:\n                member = stack.pop()\n                on_stack.remove(member)\n                component.append(member)\n                if member == node:\n                    break\n            components.append(sorted(component))\n    for node in sorted(outgoing):\n        if node not in index:\n            visit(node)\n    cycles = sorted(component for component in components if len(component) > 1 or component[0] in outgoing[component[0]])\n    cyclic = {node for component in cycles for node in component}\n    executed = set(order)\n    return {\"order\": order, \"cycles\": cycles, \"blocked\": sorted(set(outgoing) - executed - cyclic)}\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Newly unlocked work takes priority",
+        "input": {
+          "tasks": [
+            {
+              "id": "publish",
+              "requires": [
+                "validate",
+                "transform"
+              ]
+            },
+            {
+              "id": "z_independent",
+              "requires": []
+            },
+            {
+              "id": "validate",
+              "requires": [
+                "source"
+              ]
+            },
+            {
+              "id": "transform",
+              "requires": [
+                "source",
+                "source"
+              ]
+            },
+            {
+              "id": "source",
+              "requires": []
+            }
+          ]
+        },
+        "expected": {
+          "order": [
+            "source",
+            "transform",
+            "validate",
+            "publish",
+            "z_independent"
+          ],
+          "cycles": [],
+          "blocked": []
+        },
+        "explanation": [
+          "Initially source and z_independent are ready; source is lexicographically smaller.",
+          "After source, transform and validate become ready and both sort before z_independent. The repeated source dependency is one edge.",
+          "After both finish, publish becomes ready and sorts before z_independent. Therefore publish runs before the task that has been waiting longest."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-cycle",
+        "name": "True cycles versus downstream victims",
+        "input": {
+          "tasks": [
+            {
+              "id": "a",
+              "requires": [
+                "b"
+              ]
+            },
+            {
+              "id": "b",
+              "requires": [
+                "a"
+              ]
+            },
+            {
+              "id": "c",
+              "requires": [
+                "b"
+              ]
+            },
+            {
+              "id": "d",
+              "requires": []
+            },
+            {
+              "id": "e",
+              "requires": [
+                "e"
+              ]
+            }
+          ]
+        },
+        "expected": {
+          "order": [
+            "d"
+          ],
+          "cycles": [
+            [
+              "a",
+              "b"
+            ],
+            [
+              "e"
+            ]
+          ],
+          "blocked": [
+            "c"
+          ]
+        },
+        "explanation": [
+          "d has no prerequisites and runs. a and b form one strongly connected cycle; e’s self-edge is a second cycle.",
+          "c waits for b but has no path back into that cycle, so c is blocked rather than cyclic."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-prerequisite",
+        "name": "Run a cycle’s prerequisite and keep separate components",
+        "input": {
+          "tasks": [
+            {
+              "id": "root",
+              "requires": []
+            },
+            {
+              "id": "b",
+              "requires": [
+                "a",
+                "root"
+              ]
+            },
+            {
+              "id": "a",
+              "requires": [
+                "b"
+              ]
+            },
+            {
+              "id": "tail",
+              "requires": [
+                "b",
+                "z"
+              ]
+            },
+            {
+              "id": "z",
+              "requires": [
+                "z"
+              ]
+            }
+          ]
+        },
+        "expected": {
+          "order": [
+            "root"
+          ],
+          "cycles": [
+            [
+              "a",
+              "b"
+            ],
+            [
+              "z"
+            ]
+          ],
+          "blocked": [
+            "tail"
+          ]
+        },
+        "explanation": [
+          "root is runnable even though its dependent b lies in a cycle. a/b and z are distinct SCCs.",
+          "tail depends on both cycles but is not part of either, so it appears only in blocked."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-empty",
+        "name": "No declared tasks",
+        "input": {
+          "tasks": []
+        },
+        "expected": {
+          "order": [],
+          "cycles": [],
+          "blocked": []
+        },
+        "explanation": [
+          "An empty graph has no runnable tasks, cyclic components, or blocked tasks."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "Deduplicate dependencies before computing indegrees. Use a min-heap for all currently zero-indegree tasks.",
+      "Kahn’s algorithm leaves both cyclic tasks and their downstream dependents unexecuted; that residual set is not itself the cycle set.",
+      "Use Tarjan’s or Kosaraju’s SCC algorithm. Components of size >1 are cycles; singleton components need a self-edge. Subtract cyclic members from the unexecuted set to get blocked."
+    ],
+    "explanation": [
+      "Build dependency sets, reverse adjacency, and unique-edge indegrees.",
+      "Run Kahn’s algorithm with a min-heap. Newly unlocked tasks compete immediately with tasks already waiting.",
+      "Traverse the graph for strongly connected components. Low-link values identify exactly which nodes can mutually reach one another.",
+      "Keep only multi-node components and self-loop singletons; sort their members and the component list for deterministic diagnostics.",
+      "The unexecuted tasks outside those components are downstream-blocked tasks. This makes the distinction actionable for an interviewer or a pipeline operator."
+    ],
+    "complexity": "O(V log V + E + sum(deg(v) log deg(v))) time in this deterministic reference (sorted DFS neighbors), plus sorting the output; O(V + E) space.",
+    "limitations": [
+      "No undeclared dependency IDs are accepted in this contract. A production scheduler should report missing declarations separately.",
+      "The output explains dependency feasibility, not resource scheduling, retries, task duration, or priority outside the defined lexical rule."
+    ],
+    "followUp": "How would you produce one minimal concrete cycle path for each component without confusing that path with every member of the component?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: treat every unscheduled node as one cycle",
+        "code": "import heapq\n\ndef solve(data):\n    dependencies = {t[\"id\"]: set(t[\"requires\"]) for t in data[\"tasks\"]}\n    outgoing = {task: set() for task in dependencies}\n    for task, required in dependencies.items():\n        for dependency in required:\n            outgoing[dependency].add(task)\n    indegree = {task: len(required) for task, required in dependencies.items()}\n    ready = [task for task, degree in indegree.items() if degree == 0]\n    heapq.heapify(ready)\n    order = []\n    while ready:\n        task = heapq.heappop(ready)\n        order.append(task)\n        for target in outgoing[task]:\n            indegree[target] -= 1\n            if indegree[target] == 0:\n                heapq.heappush(ready, target)\n    index, lowlink, stack, on_stack, components = {}, {}, [], set(), []\n    def visit(node):\n        index[node] = lowlink[node] = len(index)\n        stack.append(node)\n        on_stack.add(node)\n        for target in sorted(outgoing[node]):\n            if target not in index:\n                visit(target)\n                lowlink[node] = min(lowlink[node], lowlink[target])\n            elif target in on_stack:\n                lowlink[node] = min(lowlink[node], index[target])\n        if lowlink[node] == index[node]:\n            component = []\n            while True:\n                member = stack.pop()\n                on_stack.remove(member)\n                component.append(member)\n                if member == node:\n                    break\n            components.append(sorted(component))\n    for node in sorted(outgoing):\n        if node not in index:\n            visit(node)\n    cycles = [sorted(set(outgoing) - set(order))] if len(order) < len(outgoing) else []\n    cyclic = {node for component in cycles for node in component}\n    executed = set(order)\n    return {\"order\": order, \"cycles\": cycles, \"blocked\": sorted(set(outgoing) - executed - cyclic)}\n"
+      },
+      {
+        "label": "Wrong: FIFO ready queue ignores newly unlocked lexical priority",
+        "code": "import heapq\n\ndef solve(data):\n    dependencies = {t[\"id\"]: set(t[\"requires\"]) for t in data[\"tasks\"]}\n    outgoing = {task: set() for task in dependencies}\n    for task, required in dependencies.items():\n        for dependency in required:\n            outgoing[dependency].add(task)\n    indegree = {task: len(required) for task, required in dependencies.items()}\n    ready = [task for task, degree in indegree.items() if degree == 0]\n    ready.sort()\n    order = []\n    while ready:\n        task = ready.pop(0)\n        order.append(task)\n        for target in sorted(outgoing[task]):\n            indegree[target] -= 1\n            if indegree[target] == 0:\n                ready.append(target)\n    index, lowlink, stack, on_stack, components = {}, {}, [], set(), []\n    def visit(node):\n        index[node] = lowlink[node] = len(index)\n        stack.append(node)\n        on_stack.add(node)\n        for target in sorted(outgoing[node]):\n            if target not in index:\n                visit(target)\n                lowlink[node] = min(lowlink[node], lowlink[target])\n            elif target in on_stack:\n                lowlink[node] = min(lowlink[node], index[target])\n        if lowlink[node] == index[node]:\n            component = []\n            while True:\n                member = stack.pop()\n                on_stack.remove(member)\n                component.append(member)\n                if member == node:\n                    break\n            components.append(sorted(component))\n    for node in sorted(outgoing):\n        if node not in index:\n            visit(node)\n    cycles = sorted(component for component in components if len(component) > 1 or component[0] in outgoing[component[0]])\n    cyclic = {node for component in cycles for node in component}\n    executed = set(order)\n    return {\"order\": order, \"cycles\": cycles, \"blocked\": sorted(set(outgoing) - executed - cyclic)}\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q08",
+    "title": "Keep exact top-K through retractions",
+    "topic": "Streaming · heaps · deterministic ranking",
+    "difficulty": "Advanced",
+    "summary": "Produce reproducible leaderboard snapshots when counts can increase, decrease, or reach zero.",
+    "prompt": "An analytics stream has positive increments and negative corrections. At selected checkpoints, report exact per-group top-K items. Items outside the current top-K may later win, so dropping their counts is unsafe.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input: events in arrival order, each {group: non-empty string, item: non-empty string, delta: nonzero integer}; k is a nonnegative integer. checkpoints is a list of distinct integers from 0 through len(events). It may be unsorted.",
+        "Apply each delta to that (group,item) count. Inputs guarantee every per-item running count stays nonnegative. Retain enough information for items outside the current top-K; zero counts do not appear in top.",
+        "A checkpoint n means after exactly the first n events, not after zero-based event index n. Return snapshots sorted by n. At n=0 no group has yet been seen.",
+        "Each snapshot contains all groups seen by that point, even groups whose total is now zero, sorted by group. Within a group, rank positive-count items by descending count, then ascending item. Emit at most k items.",
+        "Return {snapshots:[{after_event_count, groups:[{group,total_count,top:[{item,count}]}]}]}. total_count sums ALL item counts, including those outside top. k=0 leaves every top empty but retains totals and groups.",
+        "There are no null groups/items/counts, time-based expiry, timestamps, timezone conversion, or rounding. All counts are exact integers. Aim to select top-K with O(U log K) snapshot work rather than sorting every item, when 0 < K < U.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # Maintain exact counts, then take deterministic bounded-heap top-K.\n    return {\"snapshots\": []}\n",
+    "solutionCode": "import heapq\n\ndef solve(data):\n    counts, totals, snapshots = {}, {}, []\n    checkpoints = set(data[\"checkpoints\"])\n    def snapshot(n):\n        groups = []\n        for group in sorted(counts):\n            candidates = ((item, count) for item, count in counts[group].items() if count > 0)\n            best = heapq.nsmallest(data[\"k\"], candidates, key=lambda pair: (-pair[1], pair[0]))\n            groups.append({\"group\": group, \"total_count\": totals[group], \"top\": [{\"item\": item, \"count\": count} for item, count in best]})\n        snapshots.append({\"after_event_count\": n, \"groups\": groups})\n    if 0 in checkpoints:\n        snapshot(0)\n    for n, event in enumerate(data[\"events\"], 1):\n        group, item = event[\"group\"], event[\"item\"]\n        bucket = counts.setdefault(group, {})\n        bucket[item] = bucket.get(item, 0) + event[\"delta\"]\n        totals[group] = totals.get(group, 0) + event[\"delta\"]\n        if n in checkpoints:\n            snapshot(n)\n    return {\"snapshots\": snapshots}\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Ties, corrections, and totals outside top-K",
+        "input": {
+          "k": 2,
+          "checkpoints": [
+            7,
+            2,
+            5
+          ],
+          "events": [
+            {
+              "group": "red",
+              "item": "b",
+              "delta": 2
+            },
+            {
+              "group": "red",
+              "item": "a",
+              "delta": 2
+            },
+            {
+              "group": "red",
+              "item": "b",
+              "delta": -1
+            },
+            {
+              "group": "blue",
+              "item": "z",
+              "delta": 3
+            },
+            {
+              "group": "red",
+              "item": "c",
+              "delta": 1
+            },
+            {
+              "group": "red",
+              "item": "a",
+              "delta": -2
+            },
+            {
+              "group": "red",
+              "item": "b",
+              "delta": 1
+            }
+          ]
+        },
+        "expected": {
+          "snapshots": [
+            {
+              "after_event_count": 2,
+              "groups": [
+                {
+                  "group": "red",
+                  "total_count": 4,
+                  "top": [
+                    {
+                      "item": "a",
+                      "count": 2
+                    },
+                    {
+                      "item": "b",
+                      "count": 2
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "after_event_count": 5,
+              "groups": [
+                {
+                  "group": "blue",
+                  "total_count": 3,
+                  "top": [
+                    {
+                      "item": "z",
+                      "count": 3
+                    }
+                  ]
+                },
+                {
+                  "group": "red",
+                  "total_count": 4,
+                  "top": [
+                    {
+                      "item": "a",
+                      "count": 2
+                    },
+                    {
+                      "item": "b",
+                      "count": 1
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "after_event_count": 7,
+              "groups": [
+                {
+                  "group": "blue",
+                  "total_count": 3,
+                  "top": [
+                    {
+                      "item": "z",
+                      "count": 3
+                    }
+                  ]
+                },
+                {
+                  "group": "red",
+                  "total_count": 3,
+                  "top": [
+                    {
+                      "item": "b",
+                      "count": 2
+                    },
+                    {
+                      "item": "c",
+                      "count": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "explanation": [
+          "After 2 events, red a and b both count 2; a wins the lexical tie despite arriving second.",
+          "After 5, red has a=2, b=1, c=1. Its top two are a,b while total_count is 4, including c. blue sorts first as a group.",
+          "After 7, a has fallen to zero and disappears from top, b rises to 2, and c remains 1. Checkpoint order is 2,5,7 despite the input order."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-comeback",
+        "name": "An item outside top-K becomes the winner",
+        "input": {
+          "k": 1,
+          "checkpoints": [
+            2,
+            3
+          ],
+          "events": [
+            {
+              "group": "g",
+              "item": "a",
+              "delta": 5
+            },
+            {
+              "group": "g",
+              "item": "b",
+              "delta": 4
+            },
+            {
+              "group": "g",
+              "item": "a",
+              "delta": -4
+            }
+          ]
+        },
+        "expected": {
+          "snapshots": [
+            {
+              "after_event_count": 2,
+              "groups": [
+                {
+                  "group": "g",
+                  "total_count": 9,
+                  "top": [
+                    {
+                      "item": "a",
+                      "count": 5
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "after_event_count": 3,
+              "groups": [
+                {
+                  "group": "g",
+                  "total_count": 5,
+                  "top": [
+                    {
+                      "item": "b",
+                      "count": 4
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "explanation": [
+          "At checkpoint 2, b is outside top-1 but its count 4 must be retained. Retracting four from a leaves a=1, so b becomes the winner without receiving another event."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-zero-k",
+        "name": "Empty top lists still carry exact totals",
+        "input": {
+          "k": 0,
+          "checkpoints": [
+            2,
+            0,
+            1
+          ],
+          "events": [
+            {
+              "group": "g",
+              "item": "x",
+              "delta": 1
+            },
+            {
+              "group": "g",
+              "item": "x",
+              "delta": -1
+            }
+          ]
+        },
+        "expected": {
+          "snapshots": [
+            {
+              "after_event_count": 0,
+              "groups": []
+            },
+            {
+              "after_event_count": 1,
+              "groups": [
+                {
+                  "group": "g",
+                  "total_count": 1,
+                  "top": []
+                }
+              ]
+            },
+            {
+              "after_event_count": 2,
+              "groups": [
+                {
+                  "group": "g",
+                  "total_count": 0,
+                  "top": []
+                }
+              ]
+            }
+          ]
+        },
+        "explanation": [
+          "Before processing, no groups exist. k=0 suppresses all ranked items while preserving totals.",
+          "After the retraction, g remains visible even though its total is zero."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-zero-count",
+        "name": "Zero-count items are excluded even with room",
+        "input": {
+          "k": 3,
+          "checkpoints": [
+            2
+          ],
+          "events": [
+            {
+              "group": "g",
+              "item": "x",
+              "delta": 2
+            },
+            {
+              "group": "g",
+              "item": "x",
+              "delta": -2
+            }
+          ]
+        },
+        "expected": {
+          "snapshots": [
+            {
+              "after_event_count": 2,
+              "groups": [
+                {
+                  "group": "g",
+                  "total_count": 0,
+                  "top": []
+                }
+              ]
+            }
+          ]
+        },
+        "explanation": [
+          "A zero-count x is not a candidate, even though k exceeds the number of distinct items."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "Keep exact counts for every observed (group,item), not just the current leaders. Negative corrections can promote a previously hidden candidate.",
+      "The ranking key is (-count, item). Use that same key for both selection and final ordering.",
+      "At each requested processed-count checkpoint, use heapq.nsmallest on positive-count candidates and compute totals independently of top-K."
+    ],
+    "explanation": [
+      "Update one group/item counter and the group’s total for each event in a single arrival-order pass.",
+      "Interpret checkpoints as processed event counts; capture zero before the loop and n after event n.",
+      "Build each group’s candidates from positive counts and select by the complete deterministic ranking key.",
+      "Retain groups with zero totals and honor k=0 without dropping metadata. Snapshot objects must be fresh rather than aliases into changing state.",
+      "The comeback fixture proves why exact arbitrary retractions require keeping nonleaders: b wins solely because a loses count."
+    ],
+    "complexity": "O(N + sum over snapshots/groups of U·log(min(K,U)+1)) selection time, plus group sorting and output; O(D + output size) state for D distinct group/item pairs. Top-K selection uses O(min(K,U)) extra heap space.",
+    "limitations": [
+      "A bounded selection heap does not make exact frequency state O(K). Exact top-K under arbitrary retractions requires information about nonleaders.",
+      "For unbounded cardinality, approximate sketches need clearly stated error guarantees and may not support arbitrary deletions."
+    ],
+    "followUp": "If memory were limited to O(K) per group, what accuracy guarantees could you offer, and how would negative updates change your choice of sketch?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: ties use arrival order rather than item name",
+        "code": "import heapq\n\ndef solve(data):\n    counts, totals, snapshots = {}, {}, []\n    checkpoints = set(data[\"checkpoints\"])\n    def snapshot(n):\n        groups = []\n        for group in sorted(counts):\n            candidates = ((item, count) for item, count in counts[group].items() if count > 0)\n            best = heapq.nsmallest(data[\"k\"], candidates, key=lambda pair: -pair[1])\n            groups.append({\"group\": group, \"total_count\": totals[group], \"top\": [{\"item\": item, \"count\": count} for item, count in best]})\n        snapshots.append({\"after_event_count\": n, \"groups\": groups})\n    if 0 in checkpoints:\n        snapshot(0)\n    for n, event in enumerate(data[\"events\"], 1):\n        group, item = event[\"group\"], event[\"item\"]\n        bucket = counts.setdefault(group, {})\n        bucket[item] = bucket.get(item, 0) + event[\"delta\"]\n        totals[group] = totals.get(group, 0) + event[\"delta\"]\n        if n in checkpoints:\n            snapshot(n)\n    return {\"snapshots\": snapshots}\n"
+      },
+      {
+        "label": "Wrong: group total counts only top-K items",
+        "code": "import heapq\n\ndef solve(data):\n    counts, totals, snapshots = {}, {}, []\n    checkpoints = set(data[\"checkpoints\"])\n    def snapshot(n):\n        groups = []\n        for group in sorted(counts):\n            candidates = ((item, count) for item, count in counts[group].items() if count > 0)\n            best = heapq.nsmallest(data[\"k\"], candidates, key=lambda pair: (-pair[1], pair[0]))\n            groups.append({\"group\": group, \"total_count\": sum(count for item, count in best), \"top\": [{\"item\": item, \"count\": count} for item, count in best]})\n        snapshots.append({\"after_event_count\": n, \"groups\": groups})\n    if 0 in checkpoints:\n        snapshot(0)\n    for n, event in enumerate(data[\"events\"], 1):\n        group, item = event[\"group\"], event[\"item\"]\n        bucket = counts.setdefault(group, {})\n        bucket[item] = bucket.get(item, 0) + event[\"delta\"]\n        totals[group] = totals.get(group, 0) + event[\"delta\"]\n        if n in checkpoints:\n            snapshot(n)\n    return {\"snapshots\": snapshots}\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q09",
+    "title": "Parse CSV with record-level quarantine",
+    "topic": "CSV · validation · multiline records",
+    "difficulty": "Advanced",
+    "summary": "Keep valid ledger rows while quarantining bad logical records and preserving exact text.",
+    "prompt": "A partner sends CSV with quoted commas, embedded newlines, duplicate event IDs, and invalid amounts. Parse it without splitting on commas or physical lines, then return accepted rows, exact integer-cent totals, and a precise quarantine report.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input is {csv: string}. The first logical record is exactly event_id,account,amount,notes, optionally preceded by a UTF-8 BOM character. CSV quoting is syntactically valid; fields may contain quoted commas/newlines. Use standard CSV double-quote escaping.",
+        "Number data logical records from 1, excluding the header; a blank physical row is an empty logical record and is invalid. For diagnostics, line_end is the 1-based physical line on which that logical record ends, as reported by csv.reader.line_num.",
+        "Validate in this order, using the first failing reason only: exactly 4 columns (\"column_count\"); trimmed nonempty event_id (\"event_id\"); trimmed nonempty account (\"account\"); valid amount (\"amount\"). Account is then casefolded; event_id is trimmed but case-sensitive. notes is preserved character-for-character after CSV decoding, including internal whitespace and newlines.",
+        "Amount is trimmed and must match ASCII [+-]?[0-9]+ with optional decimal point followed by 1 or 2 digits. No exponent, commas, currency symbol, empty amount, literal null, or more than 2 fractional digits. Convert exactly to signed integer cents with no rounding; negative zero becomes integer 0.",
+        "After validation, duplicate event_id uses first VALID row wins. Invalid rows never reserve IDs. Report duplicates separately as {record,line_end,event_id}; a malformed repeated ID still belongs to errors if validation fails first.",
+        "Return {rows:[{event_id,account,cents,notes}], totals:[{account,cents}], errors:[{record,line_end,reason}], duplicates:[{record,line_end,event_id}]}. Rows/errors/duplicates keep encounter order; totals sort by normalized account and include zero totals. There are no timestamps or timezone conversions.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # Use csv.reader on StringIO(newline=\"\"). Track logical records and line_num.\n    return {\"rows\": [], \"totals\": [], \"errors\": [], \"duplicates\": []}\n",
+    "solutionCode": "import csv\nimport io\nimport re\n\ndef solve(data):\n    reader = csv.reader(io.StringIO(data[\"csv\"].removeprefix(\"\\ufeff\"), newline=\"\"))\n    next(reader)\n    rows, errors, duplicates, seen, totals = [], [], [], set(), {}\n    for record, fields in enumerate(reader, 1):\n        diagnostic = {\"record\": record, \"line_end\": reader.line_num}\n        reason = None\n        if len(fields) != 4:\n            reason = \"column_count\"\n        else:\n            event_id, account, amount, notes = fields\n            event_id, account, amount = event_id.strip(), account.strip().casefold(), amount.strip()\n            if not event_id:\n                reason = \"event_id\"\n            elif not account:\n                reason = \"account\"\n            elif re.fullmatch(r\"[+-]?[0-9]+(?:\\.[0-9]{1,2})?\", amount) is None:\n                reason = \"amount\"\n        if reason is not None:\n            errors.append({**diagnostic, \"reason\": reason})\n            continue\n        if event_id in seen:\n            duplicates.append({**diagnostic, \"event_id\": event_id})\n            continue\n        sign = -1 if amount.startswith(\"-\") else 1\n        digits = amount.lstrip(\"+-\")\n        whole, dot, fraction = digits.partition(\".\")\n        cents = sign * (int(whole) * 100 + int((fraction + \"00\")[:2]))\n        seen.add(event_id)\n        rows.append({\"event_id\": event_id, \"account\": account, \"cents\": cents, \"notes\": notes})\n        totals[account] = totals.get(account, 0) + cents\n    return {\"rows\": rows, \"totals\": [{\"account\": account, \"cents\": totals[account]} for account in sorted(totals)], \"errors\": errors, \"duplicates\": duplicates}\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Quoted commas, embedded newlines, and invalid amounts",
+        "input": {
+          "csv": "event_id,account,amount,notes\ne1,\" Acme \",12.30,\"first, paid\"\ne2,acme,-2.05,\"two\nlines\"\ne1,ACME,99.00,duplicate\nbad, ,1.00,blank account\ne3,Beta,0.001,too precise\ne4,Beta,+3.5,ok\n"
+        },
+        "expected": {
+          "rows": [
+            {
+              "event_id": "e1",
+              "account": "acme",
+              "cents": 1230,
+              "notes": "first, paid"
+            },
+            {
+              "event_id": "e2",
+              "account": "acme",
+              "cents": -205,
+              "notes": "two\nlines"
+            },
+            {
+              "event_id": "e4",
+              "account": "beta",
+              "cents": 350,
+              "notes": "ok"
+            }
+          ],
+          "totals": [
+            {
+              "account": "acme",
+              "cents": 1025
+            },
+            {
+              "account": "beta",
+              "cents": 350
+            }
+          ],
+          "errors": [
+            {
+              "record": 4,
+              "line_end": 6,
+              "reason": "account"
+            },
+            {
+              "record": 5,
+              "line_end": 7,
+              "reason": "amount"
+            }
+          ],
+          "duplicates": [
+            {
+              "record": 3,
+              "line_end": 5,
+              "event_id": "e1"
+            }
+          ]
+        },
+        "explanation": [
+          "e1 is 1230 cents. The quoted comma remains inside notes, so it does not create a fifth column.",
+          "e2 spans physical lines 3–4 but is logical record 2; -205 cents brings acme to 1025. Its embedded newline is preserved.",
+          "Record 3 repeats a valid e1 and is a duplicate. Record 4 has an empty trimmed account; record 5 has three decimal places and is rejected, not rounded.",
+          "Record 6 accepts +3.5 as 350 cents for beta. Diagnostics use logical record numbers and physical ending-line numbers separately."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-reservation",
+        "name": "Invalid IDs are not reserved; validation wins over dedup",
+        "input": {
+          "csv": "event_id,account,amount,notes\ne1,a,1e2,bad\ne1,a,1.00,ok\ne1,a,2.00,repeat\ne1,a,bad,invalid repeat\n, ,bad,precedence\nshort,a,1\n"
+        },
+        "expected": {
+          "rows": [
+            {
+              "event_id": "e1",
+              "account": "a",
+              "cents": 100,
+              "notes": "ok"
+            }
+          ],
+          "totals": [
+            {
+              "account": "a",
+              "cents": 100
+            }
+          ],
+          "errors": [
+            {
+              "record": 1,
+              "line_end": 2,
+              "reason": "amount"
+            },
+            {
+              "record": 4,
+              "line_end": 5,
+              "reason": "amount"
+            },
+            {
+              "record": 5,
+              "line_end": 6,
+              "reason": "event_id"
+            },
+            {
+              "record": 6,
+              "line_end": 7,
+              "reason": "column_count"
+            }
+          ],
+          "duplicates": [
+            {
+              "record": 3,
+              "line_end": 4,
+              "event_id": "e1"
+            }
+          ]
+        },
+        "explanation": [
+          "1e2 is rejected, so the valid second record can claim e1. The third valid occurrence is a duplicate.",
+          "The fourth occurrence has an invalid amount and is quarantined before deduplication. The fifth fails event_id before account or amount; the sixth fails column_count first."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-bom",
+        "name": "BOM, CRLF, escaped quotes, and blank rows",
+        "input": {
+          "csv": "﻿event_id,account,amount,notes\r\n X ,Straße,-0.00,\"said \"\"hi\"\"\"\r\n\r\nY,STRASSE,2,  keep  \r\n"
+        },
+        "expected": {
+          "rows": [
+            {
+              "event_id": "X",
+              "account": "strasse",
+              "cents": 0,
+              "notes": "said \"hi\""
+            },
+            {
+              "event_id": "Y",
+              "account": "strasse",
+              "cents": 200,
+              "notes": "  keep  "
+            }
+          ],
+          "totals": [
+            {
+              "account": "strasse",
+              "cents": 200
+            }
+          ],
+          "errors": [
+            {
+              "record": 2,
+              "line_end": 3,
+              "reason": "column_count"
+            }
+          ],
+          "duplicates": []
+        },
+        "explanation": [
+          "The optional BOM belongs to the header and is removed. X is trimmed, the escaped quotes decode to said \"hi\", and -0.00 becomes integer zero.",
+          "The blank physical line is logical record 2 with zero columns. Straße and STRASSE both casefold to strasse.",
+          "Y’s notes keep their leading and trailing spaces; its whole-number amount becomes 200 cents."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-ascii",
+        "name": "Unicode digits and extra columns are invalid",
+        "input": {
+          "csv": "event_id,account,amount,notes\nu,a,１２.３,unicode digits\nx,a,1,ok,extra\nv,a,12.3,valid\n"
+        },
+        "expected": {
+          "rows": [
+            {
+              "event_id": "v",
+              "account": "a",
+              "cents": 1230,
+              "notes": "valid"
+            }
+          ],
+          "totals": [
+            {
+              "account": "a",
+              "cents": 1230
+            }
+          ],
+          "errors": [
+            {
+              "record": 1,
+              "line_end": 2,
+              "reason": "amount"
+            },
+            {
+              "record": 2,
+              "line_end": 3,
+              "reason": "column_count"
+            }
+          ],
+          "duplicates": []
+        },
+        "explanation": [
+          "Fullwidth digits are numeric-looking but fail the explicit ASCII amount grammar. The next row has five columns, so column_count wins.",
+          "Only v is accepted, with 12.3 normalized to 1230 cents."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "csv.reader understands quoted delimiters and multiline fields. enumerate(reader, 1) counts logical records; reader.line_num counts physical lines.",
+      "Apply the specified validation precedence before touching the deduplication set. Only a valid accepted ID is reserved.",
+      "Validate decimal syntax, then split sign, whole, and fraction to compute integer cents. This avoids both float error and accidental rounding."
+    ],
+    "explanation": [
+      "Remove a leading BOM only, wrap the complete text in StringIO with newline=\"\", and consume the valid header.",
+      "For each parsed record, retain its logical record number and physical ending-line number before validation.",
+      "Check column count before unpacking; then validate ID, account, and amount in order. Quarantine once using the first reason.",
+      "Check deduplication only for valid rows. Parse cents by integer arithmetic, normalize the account, and preserve decoded notes exactly.",
+      "Accumulate totals from accepted rows only and sort accounts at the end. A quarantined or duplicate record has no financial effect."
+    ],
+    "complexity": "O(C + A log A) time for C input characters and A accepted account names; O(C + U + A + output size) space because the input string and output are materialized, with U accepted IDs.",
+    "limitations": [
+      "Malformed CSV quote syntax is outside this contract; a production parser must distinguish fatal syntax errors from recoverable row validation failures.",
+      "The function holds accepted IDs in memory. Large feeds may need an external dedup index and streaming quarantine sink."
+    ],
+    "followUp": "How would you preserve stable byte offsets for rejected multiline records if the source used mixed encodings or was read in chunks?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: split physical lines before CSV parsing",
+        "code": "import csv\nimport io\nimport re\n\ndef solve(data):\n    reader = csv.reader(data[\"csv\"].removeprefix(\"\\ufeff\").splitlines())\n    next(reader)\n    rows, errors, duplicates, seen, totals = [], [], [], set(), {}\n    for record, fields in enumerate(reader, 1):\n        diagnostic = {\"record\": record, \"line_end\": reader.line_num}\n        reason = None\n        if len(fields) != 4:\n            reason = \"column_count\"\n        else:\n            event_id, account, amount, notes = fields\n            event_id, account, amount = event_id.strip(), account.strip().casefold(), amount.strip()\n            if not event_id:\n                reason = \"event_id\"\n            elif not account:\n                reason = \"account\"\n            elif re.fullmatch(r\"[+-]?[0-9]+(?:\\.[0-9]{1,2})?\", amount) is None:\n                reason = \"amount\"\n        if reason is not None:\n            errors.append({**diagnostic, \"reason\": reason})\n            continue\n        if event_id in seen:\n            duplicates.append({**diagnostic, \"event_id\": event_id})\n            continue\n        sign = -1 if amount.startswith(\"-\") else 1\n        digits = amount.lstrip(\"+-\")\n        whole, dot, fraction = digits.partition(\".\")\n        cents = sign * (int(whole) * 100 + int((fraction + \"00\")[:2]))\n        seen.add(event_id)\n        rows.append({\"event_id\": event_id, \"account\": account, \"cents\": cents, \"notes\": notes})\n        totals[account] = totals.get(account, 0) + cents\n    return {\"rows\": rows, \"totals\": [{\"account\": account, \"cents\": totals[account]} for account in sorted(totals)], \"errors\": errors, \"duplicates\": duplicates}\n"
+      },
+      {
+        "label": "Wrong: report physical lines as logical record numbers",
+        "code": "import csv\nimport io\nimport re\n\ndef solve(data):\n    reader = csv.reader(io.StringIO(data[\"csv\"].removeprefix(\"\\ufeff\"), newline=\"\"))\n    next(reader)\n    rows, errors, duplicates, seen, totals = [], [], [], set(), {}\n    for record, fields in enumerate(reader, 1):\n        diagnostic = {\"record\": reader.line_num - 1, \"line_end\": reader.line_num}\n        reason = None\n        if len(fields) != 4:\n            reason = \"column_count\"\n        else:\n            event_id, account, amount, notes = fields\n            event_id, account, amount = event_id.strip(), account.strip().casefold(), amount.strip()\n            if not event_id:\n                reason = \"event_id\"\n            elif not account:\n                reason = \"account\"\n            elif re.fullmatch(r\"[+-]?[0-9]+(?:\\.[0-9]{1,2})?\", amount) is None:\n                reason = \"amount\"\n        if reason is not None:\n            errors.append({**diagnostic, \"reason\": reason})\n            continue\n        if event_id in seen:\n            duplicates.append({**diagnostic, \"event_id\": event_id})\n            continue\n        sign = -1 if amount.startswith(\"-\") else 1\n        digits = amount.lstrip(\"+-\")\n        whole, dot, fraction = digits.partition(\".\")\n        cents = sign * (int(whole) * 100 + int((fraction + \"00\")[:2]))\n        seen.add(event_id)\n        rows.append({\"event_id\": event_id, \"account\": account, \"cents\": cents, \"notes\": notes})\n        totals[account] = totals.get(account, 0) + cents\n    return {\"rows\": rows, \"totals\": [{\"account\": account, \"cents\": totals[account]} for account in sorted(totals)], \"errors\": errors, \"duplicates\": duplicates}\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  },
+  {
+    "id": "q10",
+    "title": "Reconcile messy snapshots explicitly",
+    "topic": "Normalization · nulls · duplicate resolution",
+    "difficulty": "Advanced",
+    "summary": "Compare source systems without silently equating missing records, nulls, and falsey values.",
+    "prompt": "Two systems export account snapshots using inconsistent ID and balance representations. Normalize each side, resolve duplicate rows by revision, and produce a full reconciliation whose differences are explainable.",
+    "contract": {
+      "signature": "solve(data)",
+      "input": "Use the JSON dataset below; all fields are described in the problem rules.",
+      "output": "Return the exact JSON-compatible object shape shown in Expected output. Object key order is ignored; array order and scalar types matter.",
+      "rules": [
+        "Input has left and right lists of rows. Each row has id (nonnegative integer excluding bool, or a string), revision (nonnegative integer), active (boolean, null, or case-insensitive trimmed string \"true\"/\"false\"), and balance (integer excluding bool, decimal string, or null). All non-null balances are finite ordinary decimal values with at most 12 digits before the point and at most 4 digits after it; no exponents. Decimal syntax allows an optional sign and requires digits before any decimal point.",
+        "Normalize IDs by converting integer IDs to strings; trim string IDs. If the resulting string contains only ASCII digits, remove leading zeroes using integer conversion (all zeroes become \"0\"). Other strings remain case-sensitive and unchanged after trimming. IDs are never null or empty after trimming.",
+        "Normalize active strings to booleans; preserve null. Normalize non-null balances with Decimal ROUND_HALF_UP to exactly two decimal places, preserving a null balance separately from zero. Display monetary zero as \"0.00\" with no negative sign.",
+        "On each side, group by normalized ID and choose the row with greatest revision. Equal revisions choose the later zero-based row index. Return all nonwinning indices ascending in discarded_left and discarded_right.",
+        "Compare only the winners. Return rows sorted lexicographically by normalized ID, with {id,status,differences,left,right}. A side is null when its record is missing; a present side is {revision,active,balance}. Revision selects winners but is not itself a compared business field.",
+        "Status is \"left_only\", \"right_only\", \"match\", or \"mismatch\". For one-sided rows, differences is []. For two-sided rows, differences lists changed business fields in fixed order [\"active\", \"balance\"], omitting unchanged ones. Null differs from false and from numeric zero. No timestamps or timezone conversion apply.",
+        "Do not mutate data. Return only JSON-compatible dicts, lists, strings, integers, booleans, or None; no sets, tuples, Decimal objects, datetime objects, NaN, or Infinity.",
+        "The supplied fixtures contain only fields and types allowed by these rules. No network access, files, external APIs, random numbers, current clock, or third-party packages are needed.",
+        "String ordering means Python Unicode code-point order unless a rule explicitly normalizes the string. No rounding is performed unless a money rule explicitly specifies it."
+      ]
+    },
+    "starterCode": "def solve(data):\n    # Normalize before deduplicating; compare winning business fields.\n    return {\"rows\": [], \"discarded_left\": [], \"discarded_right\": []}\n",
+    "solutionCode": "import re\nfrom decimal import Decimal, ROUND_HALF_UP, localcontext\n\ndef solve(data):\n    def normalize_id(value):\n        value = str(value).strip()\n        return str(int(value)) if re.fullmatch(r\"[0-9]+\", value) else value\n    def normalize_active(value):\n        return value.strip().lower() == \"true\" if isinstance(value, str) else value\n    def normalize_balance(value):\n        if value is None:\n            return None\n        with localcontext() as ctx:\n            ctx.prec = 40\n            amount = Decimal(str(value)).quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)\n            return format(abs(amount) if amount == 0 else amount, \".2f\")\n    def select(rows):\n        winners = {}\n        for index, row in enumerate(rows):\n            key = normalize_id(row[\"id\"])\n            rank = (row[\"revision\"], index)\n            if key not in winners or rank > winners[key][0]:\n                winners[key] = (rank, {\"revision\": row[\"revision\"], \"active\": normalize_active(row[\"active\"]), \"balance\": normalize_balance(row[\"balance\"])})\n        selected = {entry[0][1] for entry in winners.values()}\n        return {key: entry[1] for key, entry in winners.items()}, [i for i in range(len(rows)) if i not in selected]\n    left, discarded_left = select(data[\"left\"])\n    right, discarded_right = select(data[\"right\"])\n    rows = []\n    for key in sorted(set(left) | set(right)):\n        l, r = left.get(key), right.get(key)\n        if l is None:\n            status, differences = \"right_only\", []\n        elif r is None:\n            status, differences = \"left_only\", []\n        else:\n            differences = [field for field in (\"active\", \"balance\") if l[field] != r[field]]\n            status = \"mismatch\" if differences else \"match\"\n        rows.append({\"id\": key, \"status\": status, \"differences\": differences, \"left\": l, \"right\": r})\n    return {\"rows\": rows, \"discarded_left\": discarded_left, \"discarded_right\": discarded_right}\n",
+    "tests": [
+      {
+        "id": "sample",
+        "name": "Canonical IDs, revision ties, and null-versus-zero",
+        "input": {
+          "left": [
+            {
+              "id": " 001 ",
+              "revision": 1,
+              "active": " TRUE ",
+              "balance": "10.005"
+            },
+            {
+              "id": 1,
+              "revision": 2,
+              "active": true,
+              "balance": "10.00"
+            },
+            {
+              "id": "2",
+              "revision": 1,
+              "active": null,
+              "balance": null
+            },
+            {
+              "id": "A",
+              "revision": 1,
+              "active": "false",
+              "balance": "0"
+            }
+          ],
+          "right": [
+            {
+              "id": "01",
+              "revision": 9,
+              "active": "true",
+              "balance": 10
+            },
+            {
+              "id": 2,
+              "revision": 2,
+              "active": false,
+              "balance": 0
+            },
+            {
+              "id": "3",
+              "revision": 1,
+              "active": true,
+              "balance": "1.005"
+            },
+            {
+              "id": " A ",
+              "revision": 1,
+              "active": true,
+              "balance": "0"
+            },
+            {
+              "id": "A",
+              "revision": 1,
+              "active": false,
+              "balance": "-0.000"
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "id": "1",
+              "status": "match",
+              "differences": [],
+              "left": {
+                "revision": 2,
+                "active": true,
+                "balance": "10.00"
+              },
+              "right": {
+                "revision": 9,
+                "active": true,
+                "balance": "10.00"
+              }
+            },
+            {
+              "id": "2",
+              "status": "mismatch",
+              "differences": [
+                "active",
+                "balance"
+              ],
+              "left": {
+                "revision": 1,
+                "active": null,
+                "balance": null
+              },
+              "right": {
+                "revision": 2,
+                "active": false,
+                "balance": "0.00"
+              }
+            },
+            {
+              "id": "3",
+              "status": "right_only",
+              "differences": [],
+              "left": null,
+              "right": {
+                "revision": 1,
+                "active": true,
+                "balance": "1.01"
+              }
+            },
+            {
+              "id": "A",
+              "status": "match",
+              "differences": [],
+              "left": {
+                "revision": 1,
+                "active": false,
+                "balance": "0.00"
+              },
+              "right": {
+                "revision": 1,
+                "active": false,
+                "balance": "0.00"
+              }
+            }
+          ],
+          "discarded_left": [
+            0
+          ],
+          "discarded_right": [
+            3
+          ]
+        },
+        "explanation": [
+          "001, 1, and 01 normalize to ID 1. Left revision 2 wins; it matches right revision 9 because revision is not a compared business field.",
+          "ID 2 is a mismatch in both fields: null active is not false, and null balance is not zero.",
+          "ID 3 exists only on the right; 1.005 rounds half-up to 1.01. Missing left is a null object, distinct from a present object with null fields.",
+          "On the right, the two A rows tie at revision 1, so later index 4 wins. -0.000 normalizes to 0.00 and A matches."
+        ],
+        "visibility": "sample"
+      },
+      {
+        "id": "edge-order",
+        "name": "Lexical ID order and case-sensitive text IDs",
+        "input": {
+          "left": [
+            {
+              "id": "010",
+              "revision": 1,
+              "active": true,
+              "balance": "2.675"
+            },
+            {
+              "id": "2",
+              "revision": 1,
+              "active": false,
+              "balance": "-0.005"
+            },
+            {
+              "id": "a",
+              "revision": 1,
+              "active": null,
+              "balance": null
+            }
+          ],
+          "right": [
+            {
+              "id": 10,
+              "revision": 0,
+              "active": "true",
+              "balance": "2.68"
+            },
+            {
+              "id": "02",
+              "revision": 3,
+              "active": "false",
+              "balance": "-0.01"
+            },
+            {
+              "id": "A",
+              "revision": 1,
+              "active": null,
+              "balance": null
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "id": "10",
+              "status": "match",
+              "differences": [],
+              "left": {
+                "revision": 1,
+                "active": true,
+                "balance": "2.68"
+              },
+              "right": {
+                "revision": 0,
+                "active": true,
+                "balance": "2.68"
+              }
+            },
+            {
+              "id": "2",
+              "status": "match",
+              "differences": [],
+              "left": {
+                "revision": 1,
+                "active": false,
+                "balance": "-0.01"
+              },
+              "right": {
+                "revision": 3,
+                "active": false,
+                "balance": "-0.01"
+              }
+            },
+            {
+              "id": "A",
+              "status": "right_only",
+              "differences": [],
+              "left": null,
+              "right": {
+                "revision": 1,
+                "active": null,
+                "balance": null
+              }
+            },
+            {
+              "id": "a",
+              "status": "left_only",
+              "differences": [],
+              "left": {
+                "revision": 1,
+                "active": null,
+                "balance": null
+              },
+              "right": null
+            }
+          ],
+          "discarded_left": [],
+          "discarded_right": []
+        },
+        "explanation": [
+          "IDs sort as strings: 10 before 2, then uppercase A before lowercase a. A and a are distinct keys.",
+          "2.675 becomes 2.68 and -0.005 becomes -0.01 under ROUND_HALF_UP, so both numeric-ID pairs match despite different revisions."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-zero",
+        "name": "Zero IDs, a single-field mismatch, and a missing counterpart",
+        "input": {
+          "left": [
+            {
+              "id": "000",
+              "revision": 2,
+              "active": false,
+              "balance": "0"
+            },
+            {
+              "id": 0,
+              "revision": 1,
+              "active": true,
+              "balance": "99"
+            },
+            {
+              "id": "Z",
+              "revision": 1,
+              "active": true,
+              "balance": null
+            }
+          ],
+          "right": [
+            {
+              "id": "0",
+              "revision": 4,
+              "active": false,
+              "balance": null
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "id": "0",
+              "status": "mismatch",
+              "differences": [
+                "balance"
+              ],
+              "left": {
+                "revision": 2,
+                "active": false,
+                "balance": "0.00"
+              },
+              "right": {
+                "revision": 4,
+                "active": false,
+                "balance": null
+              }
+            },
+            {
+              "id": "Z",
+              "status": "left_only",
+              "differences": [],
+              "left": {
+                "revision": 1,
+                "active": true,
+                "balance": null
+              },
+              "right": null
+            }
+          ],
+          "discarded_left": [
+            1
+          ],
+          "discarded_right": []
+        },
+        "explanation": [
+          "All-zero ID 000 normalizes to 0. Its later-arriving but lower-revision left row loses.",
+          "Both active values for 0 are false, so only balance is listed as different. Z is a present left row with null balance, not a missing left row."
+        ],
+        "visibility": "edge"
+      },
+      {
+        "id": "edge-ascii-id",
+        "name": "Numeric-looking Unicode IDs remain text",
+        "input": {
+          "left": [
+            {
+              "id": "１",
+              "revision": 1,
+              "active": true,
+              "balance": 0
+            }
+          ],
+          "right": [
+            {
+              "id": "1",
+              "revision": 1,
+              "active": true,
+              "balance": 0
+            }
+          ]
+        },
+        "expected": {
+          "rows": [
+            {
+              "id": "1",
+              "status": "right_only",
+              "differences": [],
+              "left": null,
+              "right": {
+                "revision": 1,
+                "active": true,
+                "balance": "0.00"
+              }
+            },
+            {
+              "id": "１",
+              "status": "left_only",
+              "differences": [],
+              "left": {
+                "revision": 1,
+                "active": true,
+                "balance": "0.00"
+              },
+              "right": null
+            }
+          ],
+          "discarded_left": [],
+          "discarded_right": []
+        },
+        "explanation": [
+          "The fullwidth character １ does not match ASCII [0-9], so it stays a distinct text ID. ASCII 1 sorts first by Unicode code point."
+        ],
+        "visibility": "edge"
+      }
+    ],
+    "hints": [
+      "Normalize IDs before deduplication. Otherwise 001 and integer 1 become different entities.",
+      "Use (revision, input index) to choose each side’s winner. Convert booleans explicitly; bool(\"false\") is True and is wrong here.",
+      "Compare the union of normalized keys, keeping missing-side null separate from present rows with null fields. Compare active then balance; ignore revision differences."
+    ],
+    "explanation": [
+      "Canonicalize IDs using ASCII digits only and case-preserving text rules. Parse active strings by content rather than truthiness.",
+      "Quantize non-null balances with Decimal ROUND_HALF_UP, formatting them consistently while preserving actual nulls.",
+      "Select winners independently on left and right by revision and arrival-index tie-break, and retain nonwinning indices for audit.",
+      "Walk the sorted union of keys. Assign one-sided statuses first, then compare only active and balance for two-sided rows.",
+      "The baseline’s ID 2 demonstrates why falsey-value coalescing is destructive: null, false, and zero represent different information."
+    ],
+    "complexity": "O(L + R + U log U) time for snapshot lengths L/R and U normalized IDs; O(U + L + R) space including discarded-index and row output.",
+    "limitations": [
+      "Normalization is a business decision: stripping numeric-ID leading zeros is correct only when both systems agree that they are insignificant.",
+      "The contract excludes malformed rows. A production reconciler should quarantine invalid types rather than silently coercing arbitrary values."
+    ],
+    "followUp": "How would you prove that an ID-normalization change will not merge two distinct real accounts before deploying it?",
+    "wrongSolutions": [
+      {
+        "label": "Wrong: parse boolean strings with bool()",
+        "code": "import re\nfrom decimal import Decimal, ROUND_HALF_UP, localcontext\n\ndef solve(data):\n    def normalize_id(value):\n        value = str(value).strip()\n        return str(int(value)) if re.fullmatch(r\"[0-9]+\", value) else value\n    def normalize_active(value):\n        return bool(value) if isinstance(value, str) else value\n    def normalize_balance(value):\n        if value is None:\n            return None\n        with localcontext() as ctx:\n            ctx.prec = 40\n            amount = Decimal(str(value)).quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)\n            return format(abs(amount) if amount == 0 else amount, \".2f\")\n    def select(rows):\n        winners = {}\n        for index, row in enumerate(rows):\n            key = normalize_id(row[\"id\"])\n            rank = (row[\"revision\"], index)\n            if key not in winners or rank > winners[key][0]:\n                winners[key] = (rank, {\"revision\": row[\"revision\"], \"active\": normalize_active(row[\"active\"]), \"balance\": normalize_balance(row[\"balance\"])})\n        selected = {entry[0][1] for entry in winners.values()}\n        return {key: entry[1] for key, entry in winners.items()}, [i for i in range(len(rows)) if i not in selected]\n    left, discarded_left = select(data[\"left\"])\n    right, discarded_right = select(data[\"right\"])\n    rows = []\n    for key in sorted(set(left) | set(right)):\n        l, r = left.get(key), right.get(key)\n        if l is None:\n            status, differences = \"right_only\", []\n        elif r is None:\n            status, differences = \"left_only\", []\n        else:\n            differences = [field for field in (\"active\", \"balance\") if l[field] != r[field]]\n            status = \"mismatch\" if differences else \"match\"\n        rows.append({\"id\": key, \"status\": status, \"differences\": differences, \"left\": l, \"right\": r})\n    return {\"rows\": rows, \"discarded_left\": discarded_left, \"discarded_right\": discarded_right}\n"
+      },
+      {
+        "label": "Wrong: coalesce a null balance to zero",
+        "code": "import re\nfrom decimal import Decimal, ROUND_HALF_UP, localcontext\n\ndef solve(data):\n    def normalize_id(value):\n        value = str(value).strip()\n        return str(int(value)) if re.fullmatch(r\"[0-9]+\", value) else value\n    def normalize_active(value):\n        return value.strip().lower() == \"true\" if isinstance(value, str) else value\n    def normalize_balance(value):\n        if value is None:\n            return \"0.00\"\n        with localcontext() as ctx:\n            ctx.prec = 40\n            amount = Decimal(str(value)).quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)\n            return format(abs(amount) if amount == 0 else amount, \".2f\")\n    def select(rows):\n        winners = {}\n        for index, row in enumerate(rows):\n            key = normalize_id(row[\"id\"])\n            rank = (row[\"revision\"], index)\n            if key not in winners or rank > winners[key][0]:\n                winners[key] = (rank, {\"revision\": row[\"revision\"], \"active\": normalize_active(row[\"active\"]), \"balance\": normalize_balance(row[\"balance\"])})\n        selected = {entry[0][1] for entry in winners.values()}\n        return {key: entry[1] for key, entry in winners.items()}, [i for i in range(len(rows)) if i not in selected]\n    left, discarded_left = select(data[\"left\"])\n    right, discarded_right = select(data[\"right\"])\n    rows = []\n    for key in sorted(set(left) | set(right)):\n        l, r = left.get(key), right.get(key)\n        if l is None:\n            status, differences = \"right_only\", []\n        elif r is None:\n            status, differences = \"left_only\", []\n        else:\n            differences = [field for field in (\"active\", \"balance\") if l[field] != r[field]]\n            status = \"mismatch\" if differences else \"match\"\n        rows.append({\"id\": key, \"status\": status, \"differences\": differences, \"left\": l, \"right\": r})\n    return {\"rows\": rows, \"discarded_left\": discarded_left, \"discarded_right\": discarded_right}\n"
+      }
+    ],
+    "estimatedMinutes": 30,
+    "provenance": "Original DataGeeks practice scenario; not attributed to any employer or real interview.",
+    "validationNotes": "Expected results were hand-authored from the stated rules, then checked against the canonical implementation. Full semantic-mutant results are in validation_report.json."
+  }
+]
